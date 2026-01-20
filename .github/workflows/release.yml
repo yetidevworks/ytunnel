@@ -168,7 +168,7 @@ jobs:
 
       - name: Write formula and push
         env:
-          GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
           VER: ${{ steps.cargo.outputs.version }}
           DARWIN_ARM64_SHA: ${{ steps.shas.outputs.darwin_arm64_sha }}
           DARWIN_X86_64_SHA: ${{ steps.shas.outputs.darwin_x86_64_sha }}
@@ -183,8 +183,8 @@ jobs:
             exit 1
           fi
 
-          rm -rf tap
-          git clone "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          # Use gh CLI for authentication
+          gh repo clone "${TAP_REPO}" tap || git init tap
 
           cd tap
           mkdir -p "$(dirname "${FORMULA_PATH}")"
@@ -236,4 +236,8 @@ jobs:
             exit 0
           fi
           git commit -m "ytunnel ${VER}: update Homebrew formula"
-          git push "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" HEAD:main
+
+          # Push using gh CLI
+          git remote set-url origin "https://github.com/${TAP_REPO}.git" || git remote add origin "https://github.com/${TAP_REPO}.git"
+          gh auth setup-git
+          git push origin HEAD:main

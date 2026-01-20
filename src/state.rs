@@ -33,6 +33,9 @@ pub struct PersistentTunnel {
     pub hostname: String,
     pub tunnel_id: String,
     pub enabled: bool,
+    /// Whether to auto-start on login (RunAtLoad in launchd)
+    #[serde(default)]
+    pub auto_start: bool,
     /// Port for cloudflared metrics endpoint (optional, calculated if not set)
     #[serde(default)]
     pub metrics_port: Option<u16>,

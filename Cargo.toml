@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Simple CLI for Cloudflare Tunnels with custom domains"
 authors = ["YetiDevWorks"]
+license = "MIT"
+repository = "https://github.com/yetidevworks/ytunnel"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

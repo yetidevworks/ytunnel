@@ -331,6 +331,7 @@ impl App {
                         hostname,
                         tunnel_id: cf_tunnel.id.clone(),
                         enabled: false,
+                        auto_start: false,
                         metrics_port: None,
                     };
 
@@ -693,6 +694,7 @@ impl App {
             hostname,
             tunnel_id: tunnel.id,
             enabled: true,
+            auto_start: false,
             metrics_port: None,
         };
 
@@ -883,6 +885,45 @@ impl App {
         }
     }
 
+    /// Toggle auto-start on login for the selected tunnel
+    pub async fn toggle_auto_start(&mut self) -> Result<()> {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            if entry.kind == TunnelKind::Ephemeral {
+                self.status_message = Some("Cannot set auto-start for ephemeral tunnel. Import it first.".to_string());
+                return Ok(());
+            }
+
+            let name = entry.tunnel.name.clone();
+            let new_auto_start = !entry.tunnel.auto_start;
+
+            // Update state
+            let mut state = TunnelState::load()?;
+            if let Some(t) = state.find_mut(&name) {
+                t.auto_start = new_auto_start;
+            }
+            state.save()?;
+
+            // Reinstall daemon with new config
+            let tunnel = state.find(&name).unwrap().clone();
+            daemon::install_daemon(&tunnel).await?;
+
+            let status = if new_auto_start { "ON" } else { "OFF" };
+            self.status_message = Some(format!("Auto-start {}: {}", status, name));
+
+            // Reload tunnels to reflect change
+            self.load_tunnels().await?;
+        }
+        Ok(())
+    }
+
+    /// Get auto-start status for the selected tunnel
+    pub fn selected_auto_start(&self) -> Option<bool> {
+        self.tunnels
+            .get(self.selected)
+            .filter(|e| e.kind == TunnelKind::Managed)
+            .map(|e| e.tunnel.auto_start)
+    }
+
     /// Start import flow for ephemeral tunnel
     /// Returns true if import was started (either directly or via dialog)
     pub async fn start_import(&mut self) -> Result<()> {
@@ -946,6 +987,7 @@ impl App {
             hostname: ephemeral.hostname.clone(),
             tunnel_id: ephemeral.tunnel_id.clone(),
             enabled: true,
+            auto_start: false,
             metrics_port: None,
         };
 
@@ -1015,6 +1057,7 @@ impl App {
             hostname,
             tunnel_id,
             enabled: true,
+            auto_start: false,
             metrics_port: None,
         };
 
@@ -1247,6 +1290,11 @@ async fn run_app(
                         }
                         KeyCode::Char('h') => {
                             app.check_health().await;
+                        }
+                        KeyCode::Char('A') => {
+                            if let Err(e) = app.toggle_auto_start().await {
+                                app.status_message = Some(format!("Error: {}", e));
+                            }
                         }
                         KeyCode::Char('?') => {
                             app.input_mode = InputMode::Help;

@@ -108,7 +108,7 @@ YTunnel is a **management tool**, not a daemon itself. Here's how the pieces fit
 | **Ephemeral** (`ytunnel run`) | Foreground process | No | Quick testing, one-off tunnels |
 | **Persistent** (`ytunnel add --start`) | launchd daemon | Yes* | Production, always-on services |
 
-*Tunnels are configured with `RunAtLoad: false` by default. They start when you run `ytunnel start` and keep running until you `ytunnel stop` or reboot. To auto-start on login, you can modify the plist.
+*Tunnels are configured with `RunAtLoad: false` by default. They start when you run `ytunnel start` and keep running until you `ytunnel stop` or reboot. To auto-start on login, press `t` in the TUI to toggle auto-start (⟳ indicator shows when enabled).
 
 ### What YTunnel Creates
 
@@ -150,6 +150,7 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 - `●` Running (green)
 - `○` Stopped (yellow)
 - `✗` Error (red)
+- `⟳` Auto-start enabled (cyan, shown after hostname)
 
 **Keyboard shortcuts:**
 | Key | Action |
@@ -161,6 +162,7 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `c` | Copy tunnel URL to clipboard |
 | `o` | Open tunnel URL in browser |
 | `h` | Check tunnel health |
+| `A` | Toggle auto-start on login (⟳ = enabled) |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
 | `r` | Refresh status |
@@ -292,6 +294,7 @@ zone_name = "example.com"
 hostname = "myapp.example.com"
 tunnel_id = "cf-tunnel-id"
 enabled = true
+auto_start = false  # Set to true to start on login
 ```
 
 ## Troubleshooting

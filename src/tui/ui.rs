@@ -124,6 +124,10 @@ fn render_help_modal(f: &mut Frame) {
             Span::styled("  m        ", Style::default().fg(Color::Cyan)),
             Span::raw("Import ephemeral tunnel as managed"),
         ]),
+        Line::from(vec![
+            Span::styled("  A        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle auto-start on login (⟳ = enabled)"),
+        ]),
         Line::from(""),
         Line::from(Span::styled("QUICK ACTIONS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -210,6 +214,13 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
                 base_style.fg(Color::DarkGray)
             };
 
+            // Auto-start indicator (only for managed tunnels)
+            let auto_start_span = if entry.kind == TunnelKind::Managed && entry.tunnel.auto_start {
+                Span::styled(" ⟳", base_style.fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            };
+
             let line = Line::from(vec![
                 Span::styled(format!("{} ", status_symbol), base_style.fg(status_color)),
                 Span::styled(
@@ -220,6 +231,7 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
                     hostname_display,
                     hostname_style,
                 ),
+                auto_start_span,
             ]);
 
             ListItem::new(line).style(base_style)
@@ -393,7 +405,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             if is_ephemeral {
                 " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
             } else {
-                " [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
+                " [a]dd [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

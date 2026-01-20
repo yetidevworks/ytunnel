@@ -301,6 +301,7 @@ async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool
         hostname: hostname.clone(),
         tunnel_id: cf_tunnel.id,
         enabled: start,
+        auto_start: false,
         metrics_port: None,
     };
 

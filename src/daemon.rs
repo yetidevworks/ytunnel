@@ -6,26 +6,38 @@ use tokio::process::Command;
 
 use crate::state::{ensure_logs_dir, write_tunnel_config, PersistentTunnel, TunnelStatus};
 
+// ============================================================================
+// Platform-specific constants and paths
+// ============================================================================
+
+#[cfg(target_os = "macos")]
 const LAUNCHD_LABEL_PREFIX: &str = "com.ytunnel";
 
-/// Get the LaunchAgents directory path
+#[cfg(target_os = "linux")]
+const SYSTEMD_SERVICE_PREFIX: &str = "ytunnel-";
+
+// ============================================================================
+// macOS (launchd) implementation
+// ============================================================================
+
+#[cfg(target_os = "macos")]
 fn launch_agents_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join("Library/LaunchAgents"))
 }
 
-/// Get the launchd label for a tunnel
+#[cfg(target_os = "macos")]
 fn launchd_label(tunnel_name: &str) -> String {
     format!("{}.{}", LAUNCHD_LABEL_PREFIX, tunnel_name)
 }
 
-/// Get the plist file path for a tunnel
+#[cfg(target_os = "macos")]
 fn plist_path(tunnel_name: &str) -> Result<PathBuf> {
     let agents_dir = launch_agents_dir()?;
     Ok(agents_dir.join(format!("{}.plist", launchd_label(tunnel_name))))
 }
 
-/// Generate the launchd plist XML content for a tunnel
+#[cfg(target_os = "macos")]
 fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
     let config_path = tunnel.config_path()?;
     let log_path = tunnel.log_path()?;
@@ -33,8 +45,8 @@ fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
     let metrics_port = tunnel.get_metrics_port();
     let run_at_load = if tunnel.auto_start { "true" } else { "false" };
 
-    // Find cloudflared path
-    let cloudflared_path = which_cloudflared().unwrap_or_else(|| "/opt/homebrew/bin/cloudflared".to_string());
+    let cloudflared_path =
+        which_cloudflared().unwrap_or_else(|| "/opt/homebrew/bin/cloudflared".to_string());
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -80,13 +92,408 @@ fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
     Ok(plist)
 }
 
+#[cfg(target_os = "macos")]
+pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
+    ensure_logs_dir()?;
+    let agents_dir = launch_agents_dir()?;
+    fs::create_dir_all(&agents_dir).with_context(|| {
+        format!(
+            "Failed to create LaunchAgents directory: {}",
+            agents_dir.display()
+        )
+    })?;
+
+    write_tunnel_config(tunnel)?;
+
+    let plist_content = generate_plist(tunnel)?;
+    let path = plist_path(&tunnel.name)?;
+    fs::write(&path, &plist_content)
+        .with_context(|| format!("Failed to write plist to {}", path.display()))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
+    stop_daemon(tunnel_name).await.ok();
+
+    let path = plist_path(tunnel_name)?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove plist: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
+    let path = plist_path(tunnel_name)?;
+
+    if !path.exists() {
+        anyhow::bail!(
+            "Plist not found for tunnel '{}'. Try adding it again.",
+            tunnel_name
+        );
+    }
+
+    let output = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&path)
+        .output()
+        .await
+        .context("Failed to run launchctl load")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("already loaded") && !stderr.is_empty() {
+            anyhow::bail!("Failed to start daemon: {}", stderr.trim());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
+    let path = plist_path(tunnel_name)?;
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let output = Command::new("launchctl")
+        .args(["unload"])
+        .arg(&path)
+        .output()
+        .await
+        .context("Failed to run launchctl unload")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("not find") && !stderr.contains("not loaded") && !stderr.is_empty() {
+            anyhow::bail!("Failed to stop daemon: {}", stderr.trim());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn is_daemon_running(tunnel_name: &str) -> bool {
+    let label = launchd_label(tunnel_name);
+
+    let output = Command::new("launchctl")
+        .args(["list"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.lines().any(|line| {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 3 && parts[2] == label {
+                    parts[0].parse::<u32>().is_ok()
+                } else {
+                    false
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
+    let label = launchd_label(&tunnel.name);
+
+    let output = Command::new("launchctl")
+        .args(["list", &label])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.contains("\"PID\"") {
+                // Running if: good exit status, no exit status info, or still actually running
+                if stdout.contains("\"LastExitStatus\" = 0")
+                    || !stdout.contains("\"LastExitStatus\"")
+                    || is_daemon_running(&tunnel.name).await
+                {
+                    TunnelStatus::Running
+                } else {
+                    TunnelStatus::Error
+                }
+            } else {
+                TunnelStatus::Stopped
+            }
+        }
+        _ => TunnelStatus::Stopped,
+    }
+}
+
+// ============================================================================
+// Linux (systemd) implementation
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+fn systemd_user_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    Ok(home.join(".config/systemd/user"))
+}
+
+#[cfg(target_os = "linux")]
+fn service_name(tunnel_name: &str) -> String {
+    format!("{}{}.service", SYSTEMD_SERVICE_PREFIX, tunnel_name)
+}
+
+#[cfg(target_os = "linux")]
+fn service_path(tunnel_name: &str) -> Result<PathBuf> {
+    let systemd_dir = systemd_user_dir()?;
+    Ok(systemd_dir.join(service_name(tunnel_name)))
+}
+
+#[cfg(target_os = "linux")]
+fn generate_service(tunnel: &PersistentTunnel) -> Result<String> {
+    let config_path = tunnel.config_path()?;
+    let log_path = tunnel.log_path()?;
+    let metrics_port = tunnel.get_metrics_port();
+
+    let cloudflared_path =
+        which_cloudflared().unwrap_or_else(|| "/usr/local/bin/cloudflared".to_string());
+
+    let service = format!(
+        r#"[Unit]
+Description=Cloudflare Tunnel - {name}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={cloudflared} tunnel --config {config} --metrics localhost:{metrics_port} run
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"#,
+        name = tunnel.name,
+        cloudflared = cloudflared_path,
+        config = config_path.display(),
+        metrics_port = metrics_port,
+        log = log_path.display()
+    );
+
+    Ok(service)
+}
+
+#[cfg(target_os = "linux")]
+async fn daemon_reload() -> Result<()> {
+    let output = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output()
+        .await
+        .context("Failed to run systemctl daemon-reload")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to reload systemd: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
+    ensure_logs_dir()?;
+    let systemd_dir = systemd_user_dir()?;
+    fs::create_dir_all(&systemd_dir).with_context(|| {
+        format!(
+            "Failed to create systemd user directory: {}",
+            systemd_dir.display()
+        )
+    })?;
+
+    write_tunnel_config(tunnel)?;
+
+    let service_content = generate_service(tunnel)?;
+    let path = service_path(&tunnel.name)?;
+    fs::write(&path, &service_content)
+        .with_context(|| format!("Failed to write service file to {}", path.display()))?;
+
+    daemon_reload().await?;
+
+    // Enable if auto_start is set
+    if tunnel.auto_start {
+        let svc = service_name(&tunnel.name);
+        Command::new("systemctl")
+            .args(["--user", "enable", &svc])
+            .output()
+            .await
+            .context("Failed to enable service")?;
+    } else {
+        // Disable if auto_start is false
+        let svc = service_name(&tunnel.name);
+        Command::new("systemctl")
+            .args(["--user", "disable", &svc])
+            .output()
+            .await
+            .ok(); // Ignore errors if not enabled
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
+    let svc = service_name(tunnel_name);
+
+    // Stop and disable
+    Command::new("systemctl")
+        .args(["--user", "stop", &svc])
+        .output()
+        .await
+        .ok();
+
+    Command::new("systemctl")
+        .args(["--user", "disable", &svc])
+        .output()
+        .await
+        .ok();
+
+    // Remove the service file
+    let path = service_path(tunnel_name)?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove service file: {}", path.display()))?;
+    }
+
+    daemon_reload().await?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
+    let path = service_path(tunnel_name)?;
+
+    if !path.exists() {
+        anyhow::bail!(
+            "Service file not found for tunnel '{}'. Try adding it again.",
+            tunnel_name
+        );
+    }
+
+    let svc = service_name(tunnel_name);
+    let output = Command::new("systemctl")
+        .args(["--user", "start", &svc])
+        .output()
+        .await
+        .context("Failed to run systemctl start")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start daemon: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
+    let path = service_path(tunnel_name)?;
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let svc = service_name(tunnel_name);
+    let output = Command::new("systemctl")
+        .args(["--user", "stop", &svc])
+        .output()
+        .await
+        .context("Failed to run systemctl stop")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "not loaded" type errors
+        if !stderr.contains("not loaded") && !stderr.is_empty() {
+            anyhow::bail!("Failed to stop daemon: {}", stderr.trim());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn is_daemon_running(tunnel_name: &str) -> bool {
+    let svc = service_name(tunnel_name);
+
+    let output = Command::new("systemctl")
+        .args(["--user", "is-active", &svc])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.trim() == "active"
+        }
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
+    let svc = service_name(&tunnel.name);
+
+    let output = Command::new("systemctl")
+        .args(["--user", "is-active", &svc])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match stdout.trim() {
+                "active" => TunnelStatus::Running,
+                "failed" => TunnelStatus::Error,
+                _ => TunnelStatus::Stopped,
+            }
+        }
+        _ => TunnelStatus::Stopped,
+    }
+}
+
+// ============================================================================
+// Shared utilities
+// ============================================================================
+
 /// Find the path to cloudflared
 fn which_cloudflared() -> Option<String> {
-    // Common paths on macOS
+    #[cfg(target_os = "macos")]
     let paths = [
         "/opt/homebrew/bin/cloudflared",
         "/usr/local/bin/cloudflared",
     ];
+
+    #[cfg(target_os = "linux")]
+    let paths = ["/usr/local/bin/cloudflared", "/usr/bin/cloudflared"];
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let paths: [&str; 0] = [];
 
     for path in paths {
         if std::path::Path::new(path).exists() {
@@ -104,162 +511,6 @@ fn which_cloudflared() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Install and load the launchd plist for a tunnel
-pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
-    // Ensure directories exist
-    ensure_logs_dir()?;
-    let agents_dir = launch_agents_dir()?;
-    fs::create_dir_all(&agents_dir)
-        .with_context(|| format!("Failed to create LaunchAgents directory: {}", agents_dir.display()))?;
-
-    // Write the tunnel config
-    write_tunnel_config(tunnel)?;
-
-    // Generate and write the plist
-    let plist_content = generate_plist(tunnel)?;
-    let path = plist_path(&tunnel.name)?;
-    fs::write(&path, &plist_content)
-        .with_context(|| format!("Failed to write plist to {}", path.display()))?;
-
-    Ok(())
-}
-
-/// Uninstall the launchd plist for a tunnel
-pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
-    // Stop if running
-    stop_daemon(tunnel_name).await.ok();
-
-    // Remove the plist file
-    let path = plist_path(tunnel_name)?;
-    if path.exists() {
-        fs::remove_file(&path)
-            .with_context(|| format!("Failed to remove plist: {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-/// Start the daemon for a tunnel
-pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
-    let path = plist_path(tunnel_name)?;
-
-    if !path.exists() {
-        anyhow::bail!("Plist not found for tunnel '{}'. Try adding it again.", tunnel_name);
-    }
-
-    let output = Command::new("launchctl")
-        .args(["load", "-w"])
-        .arg(&path)
-        .output()
-        .await
-        .context("Failed to run launchctl load")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Ignore "already loaded" errors
-        if !stderr.contains("already loaded") && !stderr.is_empty() {
-            anyhow::bail!("Failed to start daemon: {}", stderr.trim());
-        }
-    }
-
-    Ok(())
-}
-
-/// Stop the daemon for a tunnel
-pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
-    let path = plist_path(tunnel_name)?;
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let output = Command::new("launchctl")
-        .args(["unload"])
-        .arg(&path)
-        .output()
-        .await
-        .context("Failed to run launchctl unload")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Ignore "not loaded" errors
-        if !stderr.contains("not find") && !stderr.contains("not loaded") && !stderr.is_empty() {
-            anyhow::bail!("Failed to stop daemon: {}", stderr.trim());
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if a daemon is running
-pub async fn is_daemon_running(tunnel_name: &str) -> bool {
-    let label = launchd_label(tunnel_name);
-
-    let output = Command::new("launchctl")
-        .args(["list"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // Look for the label in the output
-            // Format: "PID\tStatus\tLabel"
-            stdout.lines().any(|line| {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 && parts[2] == label {
-                    // Check if PID is a number (running) vs "-" (not running)
-                    parts[0].parse::<u32>().is_ok()
-                } else {
-                    false
-                }
-            })
-        }
-        _ => false,
-    }
-}
-
-/// Get the current status of a tunnel daemon
-pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
-    let label = launchd_label(&tunnel.name);
-
-    let output = Command::new("launchctl")
-        .args(["list", &label])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // If we get output and it contains PID, it's running
-            // Format shows "PID" = number if running
-            if stdout.contains("\"PID\"") {
-                // Check exit status
-                if stdout.contains("\"LastExitStatus\" = 0") || !stdout.contains("\"LastExitStatus\"") {
-                    TunnelStatus::Running
-                } else {
-                    // Has non-zero exit status but might still be running with KeepAlive
-                    if is_daemon_running(&tunnel.name).await {
-                        TunnelStatus::Running
-                    } else {
-                        TunnelStatus::Error
-                    }
-                }
-            } else {
-                TunnelStatus::Stopped
-            }
-        }
-        _ => {
-            // Daemon not loaded
-            TunnelStatus::Stopped
-        }
-    }
-}
-
 /// Read recent log lines for a tunnel
 pub fn read_log_tail(tunnel: &PersistentTunnel, lines: usize) -> Result<Vec<String>> {
     let log_path = tunnel.log_path()?;
@@ -273,7 +524,6 @@ pub fn read_log_tail(tunnel: &PersistentTunnel, lines: usize) -> Result<Vec<Stri
 
     let all_lines: Vec<String> = content.lines().map(String::from).collect();
 
-    // Return last N lines
     let start = if all_lines.len() > lines {
         all_lines.len() - lines
     } else {
@@ -281,4 +531,38 @@ pub fn read_log_tail(tunnel: &PersistentTunnel, lines: usize) -> Result<Vec<Stri
     };
 
     Ok(all_lines[start..].to_vec())
+}
+
+// ============================================================================
+// Unsupported platforms
+// ============================================================================
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn install_daemon(_tunnel: &PersistentTunnel) -> Result<()> {
+    anyhow::bail!("Daemon management is not supported on this platform. Use 'ytunnel run' for ephemeral tunnels.")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn uninstall_daemon(_tunnel_name: &str) -> Result<()> {
+    anyhow::bail!("Daemon management is not supported on this platform")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn start_daemon(_tunnel_name: &str) -> Result<()> {
+    anyhow::bail!("Daemon management is not supported on this platform. Use 'ytunnel run' for ephemeral tunnels.")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn stop_daemon(_tunnel_name: &str) -> Result<()> {
+    anyhow::bail!("Daemon management is not supported on this platform")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn is_daemon_running(_tunnel_name: &str) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn get_daemon_status(_tunnel: &PersistentTunnel) -> TunnelStatus {
+    TunnelStatus::Stopped
 }

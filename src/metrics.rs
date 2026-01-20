@@ -24,29 +24,9 @@ pub struct TunnelMetrics {
 impl TunnelMetrics {
     /// Fetch metrics from a cloudflared metrics endpoint
     pub async fn fetch(metrics_url: &str) -> Self {
-        match fetch_metrics_internal(metrics_url).await {
-            Ok(metrics) => metrics,
-            Err(_) => Self::default(),
-        }
-    }
-
-    /// Get a summary string of the metrics
-    pub fn summary(&self) -> String {
-        if !self.available {
-            return "Metrics unavailable".to_string();
-        }
-
-        let codes: String = self
-            .response_codes
-            .iter()
-            .map(|(code, count)| format!("{}:{}", code, count))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        format!(
-            "Requests: {} | Errors: {} | Connections: {} | {}",
-            self.total_requests, self.request_errors, self.ha_connections, codes
-        )
+        fetch_metrics_internal(metrics_url)
+            .await
+            .unwrap_or_default()
     }
 
     /// Get the list of edge locations as a string

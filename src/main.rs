@@ -10,7 +10,7 @@ mod tunnel;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ZonesCommands};
-use state::{PersistentTunnel, TunnelState, write_tunnel_config};
+use state::{write_tunnel_config, PersistentTunnel, TunnelState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,7 +33,12 @@ async fn main() -> Result<()> {
             };
             cmd_run(name, target, zone).await?;
         }
-        Some(Commands::Add { name, target, zone, start }) => {
+        Some(Commands::Add {
+            name,
+            target,
+            zone,
+            start,
+        }) => {
             cmd_add(name, target, zone, start).await?;
         }
         Some(Commands::Start { name }) => {
@@ -45,7 +50,11 @@ async fn main() -> Result<()> {
         Some(Commands::Restart { name }) => {
             cmd_restart(name).await?;
         }
-        Some(Commands::Logs { name, follow, lines }) => {
+        Some(Commands::Logs {
+            name,
+            follow,
+            lines,
+        }) => {
             cmd_logs(name, follow, lines).await?;
         }
         Some(Commands::Zones { command }) => match command {
@@ -237,7 +246,11 @@ async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool
     // Check if tunnel already exists in state
     let state = TunnelState::load()?;
     if state.find(&name).is_some() {
-        anyhow::bail!("Tunnel '{}' already exists. Use `ytunnel delete {}` first.", name, name);
+        anyhow::bail!(
+            "Tunnel '{}' already exists. Use `ytunnel delete {}` first.",
+            name,
+            name
+        );
     }
 
     // Determine zone
@@ -336,7 +349,10 @@ async fn cmd_start(name: String) -> Result<()> {
     // Get tunnel info and hostname before mutable borrow
     let (hostname, tunnel_clone) = {
         let tunnel = state.find(&name).ok_or_else(|| {
-            anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+            anyhow::anyhow!(
+                "Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.",
+                name
+            )
         })?;
         (tunnel.hostname.clone(), tunnel.clone())
     };
@@ -369,7 +385,10 @@ async fn cmd_stop(name: String) -> Result<()> {
     // Get hostname before mutable borrow
     let hostname = {
         let tunnel = state.find(&name).ok_or_else(|| {
-            anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+            anyhow::anyhow!(
+                "Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.",
+                name
+            )
         })?;
         tunnel.hostname.clone()
     };
@@ -392,9 +411,15 @@ async fn cmd_stop(name: String) -> Result<()> {
 async fn cmd_restart(name: String) -> Result<()> {
     let state = TunnelState::load()?;
 
-    let tunnel = state.find(&name).ok_or_else(|| {
-        anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
-    })?.clone();
+    let tunnel = state
+        .find(&name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.",
+                name
+            )
+        })?
+        .clone();
 
     println!("Restarting tunnel: {}", name);
 
@@ -426,7 +451,10 @@ async fn cmd_logs(name: String, follow: bool, lines: usize) -> Result<()> {
     let state = TunnelState::load()?;
 
     let tunnel = state.find(&name).ok_or_else(|| {
-        anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+        anyhow::anyhow!(
+            "Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.",
+            name
+        )
     })?;
 
     let log_path = tunnel.log_path()?;
@@ -538,7 +566,10 @@ async fn cmd_delete(name: String) -> Result<()> {
     let mut state = TunnelState::load()?;
     if let Some(tunnel) = state.remove(&name) {
         // Delete from Cloudflare
-        client.delete_tunnel(&cfg.account_id, &tunnel.tunnel_id).await.ok();
+        client
+            .delete_tunnel(&cfg.account_id, &tunnel.tunnel_id)
+            .await
+            .ok();
         println!("✓ Deleted Cloudflare tunnel");
 
         // Remove credentials file
@@ -561,7 +592,10 @@ async fn cmd_delete(name: String) -> Result<()> {
     } else {
         // Try deleting from Cloudflare directly (might be a tunnel created with `run`)
         let tunnel_name = format!("ytunnel-{}", name);
-        match client.get_tunnel_by_name(&cfg.account_id, &tunnel_name).await? {
+        match client
+            .get_tunnel_by_name(&cfg.account_id, &tunnel_name)
+            .await?
+        {
             Some(t) => {
                 // Delete credentials file if it exists
                 if let Ok(creds_path) = t.credentials_path() {

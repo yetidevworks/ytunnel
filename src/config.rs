@@ -32,14 +32,12 @@ pub fn config_path() -> Result<PathBuf> {
 pub fn load_config() -> Result<Config> {
     let path = config_path()?;
     if !path.exists() {
-        anyhow::bail!(
-            "ytunnel is not configured. Run `ytunnel init` first."
-        );
+        anyhow::bail!("ytunnel is not configured. Run `ytunnel init` first.");
     }
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config from {}", path.display()))?;
-    let config: Config = toml::from_str(&contents)
-        .with_context(|| "Failed to parse config file")?;
+    let config: Config =
+        toml::from_str(&contents).with_context(|| "Failed to parse config file")?;
     Ok(config)
 }
 
@@ -49,8 +47,7 @@ pub fn save_config(config: &Config) -> Result<()> {
         .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
 
     let path = config_path()?;
-    let contents = toml::to_string_pretty(config)
-        .context("Failed to serialize config")?;
+    let contents = toml::to_string_pretty(config).context("Failed to serialize config")?;
     fs::write(&path, contents)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
 

@@ -67,7 +67,10 @@ impl PersistentTunnel {
         self.metrics_port.unwrap_or_else(|| {
             // Calculate a port based on the tunnel name hash
             // Range: 21000-21999 to avoid conflicts with cloudflared defaults (20241-20245)
-            let hash: u32 = self.name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+            let hash: u32 = self
+                .name
+                .bytes()
+                .fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
             21000 + (hash % 1000) as u16
         })
     }
@@ -150,8 +153,12 @@ pub fn tunnels_path() -> Result<PathBuf> {
 pub fn ensure_configs_dir() -> Result<PathBuf> {
     let config_dir = config::config_dir()?;
     let configs_dir = config_dir.join("tunnel-configs");
-    fs::create_dir_all(&configs_dir)
-        .with_context(|| format!("Failed to create configs directory: {}", configs_dir.display()))?;
+    fs::create_dir_all(&configs_dir).with_context(|| {
+        format!(
+            "Failed to create configs directory: {}",
+            configs_dir.display()
+        )
+    })?;
     Ok(configs_dir)
 }
 
@@ -169,11 +176,12 @@ pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
     let credentials_path = tunnel.credentials_path()?;
 
     // Normalize target URL
-    let target_url = if tunnel.target.starts_with("http://") || tunnel.target.starts_with("https://") {
-        tunnel.target.clone()
-    } else {
-        format!("http://{}", tunnel.target)
-    };
+    let target_url =
+        if tunnel.target.starts_with("http://") || tunnel.target.starts_with("https://") {
+            tunnel.target.clone()
+        } else {
+            format!("http://{}", tunnel.target)
+        };
 
     let config = format!(
         r#"tunnel: {tunnel_id}

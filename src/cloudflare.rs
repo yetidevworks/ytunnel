@@ -25,7 +25,6 @@ pub struct Zone {
     pub account: Account,
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -33,7 +32,7 @@ pub struct Account {
 
 // Flatten for config storage
 impl Zone {
-    pub fn to_flat(self) -> FlatZone {
+    pub fn into_flat(self) -> FlatZone {
         FlatZone {
             id: self.id,
             name: self.name,
@@ -143,7 +142,7 @@ impl Client {
             .result
             .unwrap_or_default()
             .into_iter()
-            .map(|z| z.to_flat())
+            .map(|z| z.into_flat())
             .collect())
     }
 
@@ -167,11 +166,7 @@ impl Client {
         Ok(resp.result.unwrap_or_default())
     }
 
-    pub async fn get_tunnel_by_name(
-        &self,
-        account_id: &str,
-        name: &str,
-    ) -> Result<Option<Tunnel>> {
+    pub async fn get_tunnel_by_name(&self, account_id: &str, name: &str) -> Result<Option<Tunnel>> {
         let tunnels = self.list_tunnels(account_id).await?;
         Ok(tunnels
             .into_iter()
@@ -226,10 +221,12 @@ impl Client {
 
         let credentials_json = serde_json::to_string_pretty(&credentials)
             .context("Failed to serialize credentials")?;
-        std::fs::write(&credentials_path, credentials_json)
-            .with_context(|| {
-                format!("Failed to write credentials to {}", credentials_path.display())
-            })?;
+        std::fs::write(&credentials_path, credentials_json).with_context(|| {
+            format!(
+                "Failed to write credentials to {}",
+                credentials_path.display()
+            )
+        })?;
 
         Ok(TunnelWithCredentials {
             tunnel,
@@ -307,18 +304,16 @@ impl Client {
             .context("Failed to parse DNS records response")?;
 
         if !resp.success {
-            anyhow::bail!("Failed to fetch DNS records: {}", format_errors(&resp.errors));
+            anyhow::bail!(
+                "Failed to fetch DNS records: {}",
+                format_errors(&resp.errors)
+            );
         }
 
         Ok(resp.result.and_then(|records| records.into_iter().next()))
     }
 
-    async fn create_dns_record(
-        &self,
-        zone_id: &str,
-        name: &str,
-        content: &str,
-    ) -> Result<()> {
+    async fn create_dns_record(&self, zone_id: &str, name: &str, content: &str) -> Result<()> {
         let url = format!("{}/zones/{}/dns_records", API_BASE, zone_id);
         let body = CreateDnsRecordRequest {
             record_type: "CNAME".to_string(),
@@ -340,7 +335,10 @@ impl Client {
             .context("Failed to parse create DNS record response")?;
 
         if !resp.success {
-            anyhow::bail!("Failed to create DNS record: {}", format_errors(&resp.errors));
+            anyhow::bail!(
+                "Failed to create DNS record: {}",
+                format_errors(&resp.errors)
+            );
         }
 
         Ok(())
@@ -374,7 +372,10 @@ impl Client {
             .context("Failed to parse update DNS record response")?;
 
         if !resp.success {
-            anyhow::bail!("Failed to update DNS record: {}", format_errors(&resp.errors));
+            anyhow::bail!(
+                "Failed to update DNS record: {}",
+                format_errors(&resp.errors)
+            );
         }
 
         Ok(())

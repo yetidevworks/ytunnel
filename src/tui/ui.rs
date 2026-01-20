@@ -15,9 +15,9 @@ pub fn render(f: &mut Frame, app: &App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),      // Content
-            Constraint::Length(1),   // Status line
-            Constraint::Length(1),   // Help bar
+            Constraint::Min(0),    // Content
+            Constraint::Length(1), // Status line
+            Constraint::Length(1), // Help bar
         ])
         .split(f.area());
 
@@ -41,7 +41,13 @@ pub fn render(f: &mut Frame, app: &App) {
         render_logs(f, app, right_chunks[0]);
 
         // Render metrics panel
-        render_metrics(f, app.selected_metrics(), &app.selected_sparkline(), app.selected_health(), right_chunks[1]);
+        render_metrics(
+            f,
+            app.selected_metrics(),
+            &app.selected_sparkline(),
+            app.selected_health(),
+            right_chunks[1],
+        );
     } else {
         // Just render logs panel
         render_logs(f, app, content_chunks[1]);
@@ -56,7 +62,12 @@ pub fn render(f: &mut Frame, app: &App) {
     // Render modals/dialogs on top
     match app.input_mode {
         InputMode::AddName => render_add_dialog(f, "Enter tunnel name:", &app.input, false),
-        InputMode::AddTarget => render_add_dialog(f, "Enter target (e.g., localhost:3000):", &app.input, app.is_importing),
+        InputMode::AddTarget => render_add_dialog(
+            f,
+            "Enter target (e.g., localhost:3000):",
+            &app.input,
+            app.is_importing,
+        ),
         InputMode::AddZone => render_zone_dialog(f, app),
         InputMode::Confirm => {
             if let Some(ref msg) = app.confirm_message {
@@ -83,7 +94,12 @@ fn render_help_modal(f: &mut Frame) {
     f.render_widget(block, area);
 
     let help_text = vec![
-        Line::from(Span::styled("NAVIGATION", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "NAVIGATION",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  ↑/k      ", Style::default().fg(Color::Cyan)),
@@ -98,7 +114,12 @@ fn render_help_modal(f: &mut Frame) {
             Span::raw("Quit ytunnel"),
         ]),
         Line::from(""),
-        Line::from(Span::styled("TUNNEL MANAGEMENT", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "TUNNEL MANAGEMENT",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  a        ", Style::default().fg(Color::Cyan)),
@@ -129,7 +150,12 @@ fn render_help_modal(f: &mut Frame) {
             Span::raw("Toggle auto-start on login (⟳ = enabled)"),
         ]),
         Line::from(""),
-        Line::from(Span::styled("QUICK ACTIONS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "QUICK ACTIONS",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  c        ", Style::default().fg(Color::Cyan)),
@@ -148,7 +174,12 @@ fn render_help_modal(f: &mut Frame) {
             Span::raw("Refresh tunnel list and status"),
         ]),
         Line::from(""),
-        Line::from(Span::styled("METRICS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "METRICS",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  Metrics auto-refresh every "),
@@ -164,8 +195,7 @@ fn render_help_modal(f: &mut Frame) {
         ]),
     ];
 
-    let help = Paragraph::new(help_text)
-        .wrap(Wrap { trim: false });
+    let help = Paragraph::new(help_text).wrap(Wrap { trim: false });
 
     f.render_widget(help, inner);
 }
@@ -223,14 +253,8 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 
             let line = Line::from(vec![
                 Span::styled(format!("{} ", status_symbol), base_style.fg(status_color)),
-                Span::styled(
-                    format!("{:<12}", entry.tunnel.name),
-                    final_name_style,
-                ),
-                Span::styled(
-                    hostname_display,
-                    hostname_style,
-                ),
+                Span::styled(format!("{:<12}", entry.tunnel.name), final_name_style),
+                Span::styled(hostname_display, hostname_style),
                 auto_start_span,
             ]);
 
@@ -238,13 +262,12 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let tunnels_list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
+    let tunnels_list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
 
     f.render_widget(tunnels_list, area);
 }
@@ -292,7 +315,13 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(logs, area);
 }
 
-fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, sparkline: &str, health: HealthStatus, area: Rect) {
+fn render_metrics(
+    f: &mut Frame,
+    metrics: Option<&TunnelMetrics>,
+    sparkline: &str,
+    health: HealthStatus,
+    area: Rect,
+) {
     let metrics = match metrics {
         Some(m) => m,
         None => return,
@@ -320,12 +349,18 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, sparkline: &st
             Span::styled("Requests: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", metrics.total_requests),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("    Errors: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", metrics.request_errors),
-                Style::default().fg(if metrics.request_errors > 0 { Color::Red } else { Color::Green }),
+                Style::default().fg(if metrics.request_errors > 0 {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
             ),
             Span::styled("    Active: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -342,7 +377,11 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, sparkline: &st
             Span::styled("HA Connections: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", metrics.ha_connections),
-                Style::default().fg(if metrics.ha_connections >= 4 { Color::Green } else { Color::Yellow }),
+                Style::default().fg(if metrics.ha_connections >= 4 {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                }),
             ),
             Span::styled("    Edge: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -353,26 +392,33 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, sparkline: &st
         Line::from(vec![
             Span::styled("Status Codes: ", Style::default().fg(Color::Gray)),
             Span::styled(
-                if codes_str.is_empty() { "none".to_string() } else { codes_str },
+                if codes_str.is_empty() {
+                    "none".to_string()
+                } else {
+                    codes_str
+                },
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
             Span::styled("Traffic: ", Style::default().fg(Color::Gray)),
             Span::styled(
-                if sparkline.is_empty() { "waiting...".to_string() } else { sparkline.to_string() },
+                if sparkline.is_empty() {
+                    "waiting...".to_string()
+                } else {
+                    sparkline.to_string()
+                },
                 Style::default().fg(Color::Green),
             ),
         ]),
     ];
 
-    let metrics_widget = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Metrics ")
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
+    let metrics_widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Metrics ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
 
     f.render_widget(metrics_widget, area);
 }
@@ -382,7 +428,10 @@ fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
 
     let style = if status_text.starts_with("Error") {
         Style::default().fg(Color::Red)
-    } else if status_text.contains("Imported") || status_text.contains("Started") || status_text.contains("Deleted") {
+    } else if status_text.contains("Imported")
+        || status_text.contains("Started")
+        || status_text.contains("Deleted")
+    {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(Color::Yellow)
@@ -411,19 +460,12 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::AddName | InputMode::AddTarget => {
             " Enter value, then press Enter. Esc to cancel.".to_string()
         }
-        InputMode::AddZone => {
-            " ↑/↓ select zone  Enter confirm  Esc cancel".to_string()
-        }
-        InputMode::Confirm => {
-            " y confirm  n/Esc cancel".to_string()
-        }
-        InputMode::Help => {
-            " Press Esc or ? to close help".to_string()
-        }
+        InputMode::AddZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
+        InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
+        InputMode::Help => " Press Esc or ? to close help".to_string(),
     };
 
-    let help = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray));
+    let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
 
     f.render_widget(help, area);
 }
@@ -434,7 +476,11 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
     // Clear the area
     f.render_widget(Clear, area);
 
-    let title = if is_importing { " Import Tunnel " } else { " Add Tunnel " };
+    let title = if is_importing {
+        " Import Tunnel "
+    } else {
+        " Add Tunnel "
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -449,8 +495,7 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
         .constraints([Constraint::Length(1), Constraint::Length(3)])
         .split(inner);
 
-    let prompt_text = Paragraph::new(prompt)
-        .style(Style::default().fg(Color::Yellow));
+    let prompt_text = Paragraph::new(prompt).style(Style::default().fg(Color::Yellow));
     f.render_widget(prompt_text, chunks[0]);
 
     let input_text = Paragraph::new(format!("{}_", input))
@@ -465,7 +510,11 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
     // Clear the area
     f.render_widget(Clear, area);
 
-    let title = if app.is_importing { " Import: Select Zone " } else { " Select Zone " };
+    let title = if app.is_importing {
+        " Import: Select Zone "
+    } else {
+        " Select Zone "
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)

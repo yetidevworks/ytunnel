@@ -4,10 +4,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
@@ -15,7 +12,7 @@ use crate::cloudflare;
 use crate::config;
 use crate::daemon;
 use crate::metrics::TunnelMetrics;
-use crate::state::{PersistentTunnel, TunnelState, TunnelStatus, write_tunnel_config};
+use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelStatus};
 
 use super::ui;
 
@@ -90,17 +87,6 @@ pub enum HealthStatus {
     Healthy,
     Unhealthy,
     Checking,
-}
-
-impl HealthStatus {
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            HealthStatus::Unknown => "?",
-            HealthStatus::Healthy => "✓",
-            HealthStatus::Unhealthy => "✗",
-            HealthStatus::Checking => "…",
-        }
-    }
 }
 
 /// Historical metrics for sparkline display
@@ -240,11 +226,8 @@ impl App {
 
         // Load tunnel state (managed tunnels)
         let state = TunnelState::load()?;
-        let managed_names: std::collections::HashSet<String> = state
-            .tunnels
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
+        let managed_names: std::collections::HashSet<String> =
+            state.tunnels.iter().map(|t| t.name.clone()).collect();
 
         // Get status for each managed tunnel
         let mut entries = Vec::new();
@@ -300,7 +283,10 @@ impl App {
                     }
 
                     // Extract the short name (without ytunnel- prefix)
-                    let short_name = cf_tunnel.name.strip_prefix("ytunnel-").unwrap_or(&cf_tunnel.name);
+                    let short_name = cf_tunnel
+                        .name
+                        .strip_prefix("ytunnel-")
+                        .unwrap_or(&cf_tunnel.name);
 
                     // Skip if already managed
                     if managed_names.contains(short_name) {
@@ -343,8 +329,6 @@ impl App {
 
                     let status = if config_exists {
                         TunnelStatus::Running
-                    } else if ephemeral.credentials_path().map(|p| p.exists()).unwrap_or(false) {
-                        TunnelStatus::Stopped // Has credentials but not running
                     } else {
                         TunnelStatus::Stopped
                     };
@@ -378,14 +362,13 @@ impl App {
     pub fn refresh_logs(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             match entry.kind {
-                TunnelKind::Managed => {
-                    match daemon::read_log_tail(&entry.tunnel, 100) {
-                        Ok(lines) => self.logs = lines,
-                        Err(e) => self.logs = vec![format!("Error reading logs: {}", e)],
-                    }
-                }
+                TunnelKind::Managed => match daemon::read_log_tail(&entry.tunnel, 100) {
+                    Ok(lines) => self.logs = lines,
+                    Err(e) => self.logs = vec![format!("Error reading logs: {}", e)],
+                },
                 TunnelKind::Ephemeral => {
-                    let has_config = entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
+                    let has_config =
+                        entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
                     self.logs = if has_config {
                         vec![
                             "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
@@ -513,24 +496,33 @@ impl App {
         }
     }
 
-    /// Send a system notification (macOS)
+    /// Send a system notification
     fn send_system_notification(&self, title: &str, message: &str) {
         use std::process::Command;
 
-        // Try terminal-notifier first, fall back to osascript
-        let result = Command::new("terminal-notifier")
-            .args(["-title", title, "-message", message, "-sound", "default"])
-            .spawn();
+        #[cfg(target_os = "macos")]
+        {
+            // Try terminal-notifier first, fall back to osascript
+            let result = Command::new("terminal-notifier")
+                .args(["-title", title, "-message", message, "-sound", "default"])
+                .spawn();
 
-        if result.is_err() {
-            // Fall back to osascript
-            let script = format!(
-                r#"display notification "{}" with title "{}""#,
-                message.replace('"', r#"\""#),
-                title.replace('"', r#"\""#)
-            );
-            Command::new("osascript")
-                .args(["-e", &script])
+            if result.is_err() {
+                // Fall back to osascript
+                let script = format!(
+                    r#"display notification "{}" with title "{}""#,
+                    message.replace('"', r#"\""#),
+                    title.replace('"', r#"\""#)
+                );
+                Command::new("osascript").args(["-e", &script]).spawn().ok();
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Use notify-send on Linux
+            Command::new("notify-send")
+                .args([title, message])
                 .spawn()
                 .ok();
         }
@@ -546,7 +538,9 @@ impl App {
 
     /// Get metrics for the selected tunnel
     pub fn selected_metrics(&self) -> Option<&TunnelMetrics> {
-        self.tunnels.get(self.selected).and_then(|e| e.metrics.as_ref())
+        self.tunnels
+            .get(self.selected)
+            .and_then(|e| e.metrics.as_ref())
     }
 
     /// Get sparkline for the selected tunnel
@@ -616,7 +610,8 @@ impl App {
                 if !self.input.is_empty() {
                     // Check if name already exists
                     if self.tunnels.iter().any(|t| t.tunnel.name == self.input) {
-                        self.status_message = Some(format!("Tunnel '{}' already exists", self.input));
+                        self.status_message =
+                            Some(format!("Tunnel '{}' already exists", self.input));
                         return;
                     }
                     self.new_tunnel_name = Some(self.input.clone());
@@ -731,7 +726,8 @@ impl App {
     pub async fn start_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
-                self.status_message = Some("Cannot start ephemeral tunnel. Import it first with 'm'.".to_string());
+                self.status_message =
+                    Some("Cannot start ephemeral tunnel. Import it first with 'm'.".to_string());
                 return Ok(());
             }
 
@@ -764,7 +760,10 @@ impl App {
     pub async fn stop_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
-                self.status_message = Some("Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal.".to_string());
+                self.status_message = Some(
+                    "Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal."
+                        .to_string(),
+                );
                 return Ok(());
             }
 
@@ -790,7 +789,8 @@ impl App {
     pub async fn restart_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
-                self.status_message = Some("Cannot restart ephemeral tunnel. Import it first with 'm'.".to_string());
+                self.status_message =
+                    Some("Cannot restart ephemeral tunnel. Import it first with 'm'.".to_string());
                 return Ok(());
             }
 
@@ -835,8 +835,8 @@ impl App {
             self.status_message = Some(format!("Copying {}...", url));
 
             // Use pbcopy on macOS
-            use std::process::{Command, Stdio};
             use std::io::Write;
+            use std::process::{Command, Stdio};
 
             let result = Command::new("pbcopy")
                 .stdin(Stdio::piped())
@@ -889,7 +889,9 @@ impl App {
     pub async fn toggle_auto_start(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
-                self.status_message = Some("Cannot set auto-start for ephemeral tunnel. Import it first.".to_string());
+                self.status_message = Some(
+                    "Cannot set auto-start for ephemeral tunnel. Import it first.".to_string(),
+                );
                 return Ok(());
             }
 
@@ -914,14 +916,6 @@ impl App {
             self.load_tunnels().await?;
         }
         Ok(())
-    }
-
-    /// Get auto-start status for the selected tunnel
-    pub fn selected_auto_start(&self) -> Option<bool> {
-        self.tunnels
-            .get(self.selected)
-            .filter(|e| e.kind == TunnelKind::Managed)
-            .map(|e| e.tunnel.auto_start)
     }
 
     /// Start import flow for ephemeral tunnel
@@ -975,7 +969,11 @@ impl App {
 
         // Ensure DNS record exists
         client
-            .ensure_dns_record(&ephemeral.zone_id, &ephemeral.hostname, &ephemeral.tunnel_id)
+            .ensure_dns_record(
+                &ephemeral.zone_id,
+                &ephemeral.hostname,
+                &ephemeral.tunnel_id,
+            )
             .await?;
 
         // Create the managed tunnel entry
@@ -1014,7 +1012,11 @@ impl App {
         self.load_tunnels().await?;
 
         // Select the imported tunnel
-        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == ephemeral.name) {
+        if let Some(pos) = self
+            .tunnels
+            .iter()
+            .position(|t| t.tunnel.name == ephemeral.name)
+        {
             self.selected = pos;
             self.refresh_logs();
         }
@@ -1116,7 +1118,9 @@ impl App {
 
         // Find the entry to check if it's ephemeral
         let entry = self.tunnels.iter().find(|e| e.tunnel.name == name);
-        let is_ephemeral = entry.map(|e| e.kind == TunnelKind::Ephemeral).unwrap_or(false);
+        let is_ephemeral = entry
+            .map(|e| e.kind == TunnelKind::Ephemeral)
+            .unwrap_or(false);
         let tunnel_id = entry.map(|e| e.tunnel.tunnel_id.clone());
 
         if is_ephemeral {
@@ -1144,7 +1148,10 @@ impl App {
                 // Delete from Cloudflare
                 if let Some(ref cfg) = self.config {
                     let client = cloudflare::Client::new(&cfg.api_token);
-                    client.delete_tunnel(&cfg.account_id, &tunnel.tunnel_id).await.ok();
+                    client
+                        .delete_tunnel(&cfg.account_id, &tunnel.tunnel_id)
+                        .await
+                        .ok();
                 }
 
                 // Remove credentials file

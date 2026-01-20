@@ -2,10 +2,14 @@
 name = "ytunnel"
 version = "0.1.0"
 edition = "2021"
-description = "Simple CLI for Cloudflare Tunnels with custom domains"
+description = "TUI-first CLI for managing Cloudflare Tunnels with custom domains"
 authors = ["YetiDevWorks"]
 license = "MIT"
 repository = "https://github.com/yetidevworks/ytunnel"
+homepage = "https://github.com/yetidevworks/ytunnel"
+readme = "README.md"
+keywords = ["cloudflare", "tunnel", "tui", "cli", "ngrok"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -415,6 +415,10 @@ systemctl --user daemon-reload
 
 ## Changelog
 
+### v0.3.2
+
+- **Fix init check** - TUI now properly exits with message if `ytunnel init` hasn't been run
+
 ### v0.3.1
 
 - **Homebrew tap support** - Install via `brew install yetidevworks/ytunnel/ytunnel`

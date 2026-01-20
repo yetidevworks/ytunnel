@@ -1207,6 +1207,14 @@ impl App {
 
 /// Run the TUI application
 pub async fn run_tui() -> Result<()> {
+    // Check if ytunnel is initialized
+    if !crate::config::config_path()?.exists() {
+        anyhow::bail!(
+            "ytunnel is not initialized.\n\n\
+             Run `ytunnel init` to set up your Cloudflare API credentials."
+        );
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();

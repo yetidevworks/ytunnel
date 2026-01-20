@@ -184,12 +184,7 @@ jobs:
           fi
 
           rm -rf tap
-
-          # Configure git credentials
-          git config --global credential.helper store
-          echo "https://x-access-token:${GH_TOKEN}@github.com" > ~/.git-credentials
-
-          git clone "https://github.com/${TAP_REPO}.git" tap
+          git clone "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
 
           cd tap
           mkdir -p "$(dirname "${FORMULA_PATH}")"
@@ -241,4 +236,4 @@ jobs:
             exit 0
           fi
           git commit -m "ytunnel ${VER}: update Homebrew formula"
-          git push origin main
+          git push "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" HEAD:main

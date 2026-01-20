@@ -1,0 +1,356 @@
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    Frame,
+};
+
+use super::app::{App, InputMode, TunnelKind};
+use crate::state::TunnelStatus;
+
+pub fn render(f: &mut Frame, app: &App) {
+    // Main layout: tunnels on left, logs on right, status line, help bar at bottom
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),      // Content
+            Constraint::Length(1),   // Status line
+            Constraint::Length(1),   // Help bar
+        ])
+        .split(f.area());
+
+    let content_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(main_chunks[0]);
+
+    // Render tunnels list
+    render_tunnels(f, app, content_chunks[0]);
+
+    // Render logs panel
+    render_logs(f, app, content_chunks[1]);
+
+    // Render status line
+    render_status_line(f, app, main_chunks[1]);
+
+    // Render help bar
+    render_help_bar(f, app, main_chunks[2]);
+
+    // Render modals/dialogs on top
+    match app.input_mode {
+        InputMode::AddName => render_add_dialog(f, "Enter tunnel name:", &app.input, false),
+        InputMode::AddTarget => render_add_dialog(f, "Enter target (e.g., localhost:3000):", &app.input, app.is_importing),
+        InputMode::AddZone => render_zone_dialog(f, app),
+        InputMode::Confirm => {
+            if let Some(ref msg) = app.confirm_message {
+                render_confirm_dialog(f, msg);
+            }
+        }
+        InputMode::Normal => {}
+    }
+}
+
+fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
+    let title = format!(" Tunnels ({}) ", app.tunnels.len());
+
+    let items: Vec<ListItem> = app
+        .tunnels
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let (status_color, status_symbol) = match entry.status {
+                TunnelStatus::Running => (Color::Green, entry.status.symbol()),
+                TunnelStatus::Stopped => (Color::Yellow, entry.status.symbol()),
+                TunnelStatus::Error => (Color::Red, entry.status.symbol()),
+            };
+
+            let selected = i == app.selected;
+
+            // Base style with optional selection background
+            let base_style = if selected {
+                Style::default().bg(Color::Rgb(40, 60, 80)) // Subtle blue background
+            } else {
+                Style::default()
+            };
+
+            let name_style = if selected {
+                base_style.fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                base_style.fg(Color::Gray)
+            };
+
+            // Show ephemeral tunnels with italic
+            let (final_name_style, hostname_display) = match entry.kind {
+                TunnelKind::Managed => (name_style, entry.tunnel.hostname.clone()),
+                TunnelKind::Ephemeral => (
+                    name_style.add_modifier(Modifier::ITALIC),
+                    format!("{} [ephemeral]", entry.tunnel.name),
+                ),
+            };
+
+            let hostname_style = if selected {
+                base_style.fg(Color::Rgb(150, 150, 150))
+            } else {
+                base_style.fg(Color::DarkGray)
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", status_symbol), base_style.fg(status_color)),
+                Span::styled(
+                    format!("{:<12}", entry.tunnel.name),
+                    final_name_style,
+                ),
+                Span::styled(
+                    hostname_display,
+                    hostname_style,
+                ),
+            ]);
+
+            ListItem::new(line).style(base_style)
+        })
+        .collect();
+
+    let tunnels_list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+
+    f.render_widget(tunnels_list, area);
+}
+
+fn render_logs(f: &mut Frame, app: &App, area: Rect) {
+    let title = if let Some(entry) = app.tunnels.get(app.selected) {
+        format!(" Logs: {} ", entry.tunnel.name)
+    } else {
+        " Logs ".to_string()
+    };
+
+    // Take last N lines that fit in the area
+    let available_height = area.height.saturating_sub(2) as usize; // -2 for borders
+    let start = if app.logs.len() > available_height {
+        app.logs.len() - available_height
+    } else {
+        0
+    };
+
+    let log_lines: Vec<Line> = app.logs[start..]
+        .iter()
+        .map(|line| {
+            let color = if line.contains("ERR") {
+                Color::Red
+            } else if line.contains("WRN") {
+                Color::Yellow
+            } else if line.contains("INF") {
+                Color::Green
+            } else {
+                Color::Gray
+            };
+            Line::from(Span::styled(line.clone(), Style::default().fg(color)))
+        })
+        .collect();
+
+    let logs = Paragraph::new(log_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(logs, area);
+}
+
+fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
+    let status_text = app.status_message.as_deref().unwrap_or("");
+
+    let style = if status_text.starts_with("Error") {
+        Style::default().fg(Color::Red)
+    } else if status_text.contains("Imported") || status_text.contains("Started") || status_text.contains("Deleted") {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    let status = Paragraph::new(format!(" {}", status_text)).style(style);
+    f.render_widget(status, area);
+}
+
+fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
+    let help_text = match app.input_mode {
+        InputMode::Normal => {
+            // Show different help based on whether an ephemeral tunnel is selected
+            let is_ephemeral = app
+                .tunnels
+                .get(app.selected)
+                .map(|e| e.kind == TunnelKind::Ephemeral)
+                .unwrap_or(false);
+
+            if is_ephemeral {
+                " [m]anage  [d]elete  [r]efresh  [q]uit".to_string()
+            } else {
+                " [a]dd  [s]tart  [S]top  [d]elete  [r]efresh  [q]uit".to_string()
+            }
+        }
+        InputMode::AddName | InputMode::AddTarget => {
+            " Enter value, then press Enter. Esc to cancel.".to_string()
+        }
+        InputMode::AddZone => {
+            " ↑/↓ select zone  Enter confirm  Esc cancel".to_string()
+        }
+        InputMode::Confirm => {
+            " y confirm  n/Esc cancel".to_string()
+        }
+    };
+
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray));
+
+    f.render_widget(help, area);
+}
+
+fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: bool) {
+    let area = centered_rect(60, 20, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let title = if is_importing { " Import Tunnel " } else { " Add Tunnel " };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Length(1), Constraint::Length(3)])
+        .split(inner);
+
+    let prompt_text = Paragraph::new(prompt)
+        .style(Style::default().fg(Color::Yellow));
+    f.render_widget(prompt_text, chunks[0]);
+
+    let input_text = Paragraph::new(format!("{}_", input))
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(input_text, chunks[1]);
+}
+
+fn render_zone_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 40, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let title = if app.is_importing { " Import: Select Zone " } else { " Select Zone " };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Show name and target being added
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let info = Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw("Name: "),
+            Span::styled(
+                app.new_tunnel_name.as_deref().unwrap_or(""),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Target: "),
+            Span::styled(
+                app.new_tunnel_target.as_deref().unwrap_or(""),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+    ]);
+    f.render_widget(info, chunks[0]);
+
+    let prompt = Paragraph::new("Select zone:").style(Style::default().fg(Color::Yellow));
+    f.render_widget(prompt, chunks[1]);
+
+    let items: Vec<ListItem> = app
+        .zones
+        .iter()
+        .enumerate()
+        .map(|(i, zone)| {
+            let selected = i == app.zone_selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            ListItem::new(Line::from(Span::styled(zone.name.clone(), style)))
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::default().borders(Borders::ALL));
+    f.render_widget(list, chunks[2]);
+}
+
+fn render_confirm_dialog(f: &mut Frame, message: &str) {
+    let area = centered_rect(60, 15, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Confirm ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let text = Paragraph::new(message)
+        .style(Style::default().fg(Color::Yellow))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::NONE));
+    f.render_widget(text, inner);
+}
+
+/// Create a centered rect of given percentage of the parent
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}

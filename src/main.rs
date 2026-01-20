@@ -1,21 +1,29 @@
 mod cli;
 mod cloudflare;
 mod config;
+mod daemon;
+mod state;
+mod tui;
 mod tunnel;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ZonesCommands};
+use state::{PersistentTunnel, TunnelState, write_tunnel_config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => {
+        None => {
+            // Default: open TUI
+            tui::run_tui().await?;
+        }
+        Some(Commands::Init) => {
             cmd_init().await?;
         }
-        Commands::Run { args, zone } => {
+        Some(Commands::Run { args, zone }) => {
             // Parse args: if 1 arg it's target, if 2 args it's name + target
             let (name, target) = if args.len() == 2 {
                 (Some(args[0].clone()), args[1].clone())
@@ -24,14 +32,23 @@ async fn main() -> Result<()> {
             };
             cmd_run(name, target, zone).await?;
         }
-        Commands::Zones { command } => match command {
+        Some(Commands::Add { name, target, zone, start }) => {
+            cmd_add(name, target, zone, start).await?;
+        }
+        Some(Commands::Start { name }) => {
+            cmd_start(name).await?;
+        }
+        Some(Commands::Stop { name }) => {
+            cmd_stop(name).await?;
+        }
+        Some(Commands::Zones { command }) => match command {
             None => cmd_zones_list().await?,
             Some(ZonesCommands::Default { domain }) => cmd_zones_default(domain).await?,
         },
-        Commands::List => {
+        Some(Commands::List) => {
             cmd_list().await?;
         }
-        Commands::Delete { name } => {
+        Some(Commands::Delete { name }) => {
             cmd_delete(name).await?;
         }
     }
@@ -107,15 +124,14 @@ async fn cmd_init() -> Result<()> {
         config::config_path()?.display()
     );
     println!("\nYou're ready! Try:");
-    println!("  ytunnel run localhost:3000              # auto-generated subdomain");
-    println!(
-        "  ytunnel run myapp localhost:3000        # myapp.{}",
-        cfg.default_zone_name
-    );
+    println!("  ytunnel                                 # open TUI dashboard");
+    println!("  ytunnel add myapp localhost:3000 -s     # add and start a tunnel");
+    println!("  ytunnel run localhost:3000              # ephemeral tunnel");
 
     Ok(())
 }
 
+/// Run an ephemeral tunnel (foreground, stops on Ctrl+C)
 async fn cmd_run(name: Option<String>, target: String, zone: Option<String>) -> Result<()> {
     let cfg = config::load_config()?;
     let client = cloudflare::Client::new(&cfg.api_token);
@@ -206,6 +222,163 @@ async fn cmd_run(name: Option<String>, target: String, zone: Option<String>) -> 
     Ok(())
 }
 
+/// Add a persistent tunnel (non-interactive CLI command)
+async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool) -> Result<()> {
+    let cfg = config::load_config()?;
+    let client = cloudflare::Client::new(&cfg.api_token);
+
+    // Check if tunnel already exists in state
+    let state = TunnelState::load()?;
+    if state.find(&name).is_some() {
+        anyhow::bail!("Tunnel '{}' already exists. Use `ytunnel delete {}` first.", name, name);
+    }
+
+    // Determine zone
+    let (zone_id, zone_name) = if let Some(z) = zone {
+        let found = cfg.zones.iter().find(|zc| zc.name == z);
+        match found {
+            Some(zc) => (zc.id.clone(), zc.name.clone()),
+            None => anyhow::bail!(
+                "Zone '{}' not found. Run `ytunnel zones` to see available zones.",
+                z
+            ),
+        }
+    } else {
+        (cfg.default_zone_id.clone(), cfg.default_zone_name.clone())
+    };
+
+    let tunnel_name = format!("ytunnel-{}", name);
+    let hostname = format!("{}.{}", name, zone_name);
+
+    println!("Adding tunnel: {} -> {}", hostname, target);
+
+    // Check if tunnel exists in Cloudflare, create if not
+    let (cf_tunnel, _credentials_path) = match client
+        .get_tunnel_by_name(&cfg.account_id, &tunnel_name)
+        .await?
+    {
+        Some(t) => {
+            let creds_path = t.credentials_path()?;
+            if !creds_path.exists() {
+                anyhow::bail!(
+                    "Credentials file not found: {}\n\
+                     This tunnel may have been created outside ytunnel.\n\
+                     Delete it with `ytunnel delete {}` and try again.",
+                    creds_path.display(),
+                    name
+                );
+            }
+            println!("✓ Using existing Cloudflare tunnel: {}", t.name);
+            (t, creds_path)
+        }
+        None => {
+            println!("Creating Cloudflare tunnel: {}", tunnel_name);
+            let result = client.create_tunnel(&cfg.account_id, &tunnel_name).await?;
+            (result.tunnel, result.credentials_path)
+        }
+    };
+
+    // Ensure DNS record exists
+    println!("Configuring DNS record...");
+    client
+        .ensure_dns_record(&zone_id, &hostname, &cf_tunnel.id)
+        .await?;
+    println!("✓ DNS configured: {}", hostname);
+
+    // Create persistent tunnel
+    let persistent = PersistentTunnel {
+        name: name.clone(),
+        target,
+        zone_id,
+        zone_name,
+        hostname: hostname.clone(),
+        tunnel_id: cf_tunnel.id,
+        enabled: start,
+    };
+
+    // Write tunnel config
+    write_tunnel_config(&persistent)?;
+
+    // Install daemon
+    daemon::install_daemon(&persistent).await?;
+    println!("✓ Daemon installed");
+
+    // Save to state
+    let mut state = TunnelState::load()?;
+    state.add(persistent);
+    state.save()?;
+    println!("✓ Tunnel saved to state");
+
+    if start {
+        daemon::start_daemon(&name).await?;
+        println!("✓ Tunnel started");
+        println!("\nTunnel running: https://{}", hostname);
+    } else {
+        println!("\nTunnel added. Start with: ytunnel start {}", name);
+    }
+
+    Ok(())
+}
+
+/// Start a stopped tunnel
+async fn cmd_start(name: String) -> Result<()> {
+    let mut state = TunnelState::load()?;
+
+    // Get tunnel info and hostname before mutable borrow
+    let (hostname, tunnel_clone) = {
+        let tunnel = state.find(&name).ok_or_else(|| {
+            anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+        })?;
+        (tunnel.hostname.clone(), tunnel.clone())
+    };
+
+    // Ensure config file exists
+    write_tunnel_config(&tunnel_clone)?;
+
+    // Ensure daemon is installed
+    daemon::install_daemon(&tunnel_clone).await?;
+
+    // Start the daemon
+    daemon::start_daemon(&name).await?;
+
+    // Update state
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = true;
+    }
+    state.save()?;
+
+    println!("✓ Started tunnel: {}", name);
+    println!("  https://{}", hostname);
+
+    Ok(())
+}
+
+/// Stop a running tunnel
+async fn cmd_stop(name: String) -> Result<()> {
+    let mut state = TunnelState::load()?;
+
+    // Get hostname before mutable borrow
+    let hostname = {
+        let tunnel = state.find(&name).ok_or_else(|| {
+            anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+        })?;
+        tunnel.hostname.clone()
+    };
+
+    daemon::stop_daemon(&name).await?;
+
+    // Update state
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = false;
+    }
+    state.save()?;
+
+    println!("✓ Stopped tunnel: {}", name);
+    println!("  {}", hostname);
+
+    Ok(())
+}
+
 async fn cmd_zones_list() -> Result<()> {
     let cfg = config::load_config()?;
 
@@ -245,27 +418,27 @@ async fn cmd_zones_default(domain: String) -> Result<()> {
 }
 
 async fn cmd_list() -> Result<()> {
-    let cfg = config::load_config()?;
-    let client = cloudflare::Client::new(&cfg.api_token);
+    let state = TunnelState::load()?;
 
-    let tunnels = client.list_tunnels(&cfg.account_id).await?;
-    let ytunnels: Vec<_> = tunnels
-        .iter()
-        .filter(|t| t.name.starts_with("ytunnel-"))
-        .collect();
+    if state.tunnels.is_empty() {
+        println!("No tunnels configured.");
+        println!("Add one with: ytunnel add <name> <target>");
+        return Ok(());
+    }
 
-    if ytunnels.is_empty() {
-        println!("No ytunnel tunnels found.");
-    } else {
-        println!("Tunnels:");
-        for t in ytunnels {
-            let status = if t.deleted_at.is_some() {
-                "deleted"
-            } else {
-                "active"
-            };
-            println!("  {} ({})", t.name, status);
-        }
+    println!("Tunnels:");
+    for tunnel in &state.tunnels {
+        let status = daemon::get_daemon_status(tunnel).await;
+        let status_symbol = status.symbol();
+        let status_text = match status {
+            state::TunnelStatus::Running => "running",
+            state::TunnelStatus::Stopped => "stopped",
+            state::TunnelStatus::Error => "error",
+        };
+        println!(
+            "  {} {:<12} {} -> {} ({})",
+            status_symbol, tunnel.name, tunnel.hostname, tunnel.target, status_text
+        );
     }
 
     Ok(())
@@ -275,26 +448,52 @@ async fn cmd_delete(name: String) -> Result<()> {
     let cfg = config::load_config()?;
     let client = cloudflare::Client::new(&cfg.api_token);
 
-    let tunnel_name = if name.starts_with("ytunnel-") {
-        name
-    } else {
-        format!("ytunnel-{}", name)
-    };
+    // Handle both "name" and "ytunnel-name" formats
+    let name = name.strip_prefix("ytunnel-").unwrap_or(&name).to_string();
 
-    match client
-        .get_tunnel_by_name(&cfg.account_id, &tunnel_name)
-        .await?
-    {
-        Some(t) => {
-            // Delete credentials file if it exists
-            if let Ok(creds_path) = t.credentials_path() {
-                std::fs::remove_file(&creds_path).ok();
-            }
-            client.delete_tunnel(&cfg.account_id, &t.id).await?;
-            println!("Deleted tunnel: {}", tunnel_name);
+    // Stop and uninstall daemon
+    daemon::stop_daemon(&name).await.ok();
+    daemon::uninstall_daemon(&name).await.ok();
+
+    // Remove from state
+    let mut state = TunnelState::load()?;
+    if let Some(tunnel) = state.remove(&name) {
+        // Delete from Cloudflare
+        client.delete_tunnel(&cfg.account_id, &tunnel.tunnel_id).await.ok();
+        println!("✓ Deleted Cloudflare tunnel");
+
+        // Remove credentials file
+        if let Ok(creds_path) = tunnel.credentials_path() {
+            std::fs::remove_file(&creds_path).ok();
         }
-        None => {
-            println!("Tunnel '{}' not found.", tunnel_name);
+
+        // Remove config file
+        if let Ok(config_path) = tunnel.config_path() {
+            std::fs::remove_file(&config_path).ok();
+        }
+
+        // Remove log file
+        if let Ok(log_path) = tunnel.log_path() {
+            std::fs::remove_file(&log_path).ok();
+        }
+
+        state.save()?;
+        println!("✓ Deleted tunnel: {}", name);
+    } else {
+        // Try deleting from Cloudflare directly (might be a tunnel created with `run`)
+        let tunnel_name = format!("ytunnel-{}", name);
+        match client.get_tunnel_by_name(&cfg.account_id, &tunnel_name).await? {
+            Some(t) => {
+                // Delete credentials file if it exists
+                if let Ok(creds_path) = t.credentials_path() {
+                    std::fs::remove_file(&creds_path).ok();
+                }
+                client.delete_tunnel(&cfg.account_id, &t.id).await?;
+                println!("✓ Deleted Cloudflare tunnel: {}", tunnel_name);
+            }
+            None => {
+                println!("Tunnel '{}' not found.", name);
+            }
         }
     }
 

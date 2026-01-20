@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -14,7 +14,7 @@ pub enum Commands {
     /// Initialize ytunnel with your Cloudflare API token
     Init,
 
-    /// Create and run a tunnel
+    /// Create and run an ephemeral tunnel (foreground, stops on Ctrl+C)
     ///
     /// Examples:
     ///   ytunnel run localhost:3000                    # auto-generated subdomain
@@ -31,13 +31,46 @@ pub enum Commands {
         zone: Option<String>,
     },
 
+    /// Add a persistent tunnel (non-interactive)
+    ///
+    /// Examples:
+    ///   ytunnel add myapp localhost:3000
+    ///   ytunnel add api localhost:8080 -z dev.example.com
+    Add {
+        /// Tunnel name (subdomain part)
+        name: String,
+
+        /// Target service (e.g., localhost:3000)
+        target: String,
+
+        /// Zone/domain to use (overrides default)
+        #[arg(short, long)]
+        zone: Option<String>,
+
+        /// Start the tunnel immediately after adding
+        #[arg(short, long)]
+        start: bool,
+    },
+
+    /// Start a stopped tunnel
+    Start {
+        /// Tunnel name
+        name: String,
+    },
+
+    /// Stop a running tunnel
+    Stop {
+        /// Tunnel name
+        name: String,
+    },
+
     /// Manage zones/domains
     Zones {
         #[command(subcommand)]
         command: Option<ZonesCommands>,
     },
 
-    /// List all ytunnel tunnels
+    /// List all tunnels (for scripting)
     List,
 
     /// Delete a tunnel

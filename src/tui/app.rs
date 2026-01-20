@@ -1,0 +1,923 @@
+use anyhow::Result;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    Terminal,
+};
+use std::io;
+use std::time::Duration;
+
+use crate::cloudflare;
+use crate::config;
+use crate::daemon;
+use crate::state::{PersistentTunnel, TunnelState, TunnelStatus, write_tunnel_config};
+
+use super::ui;
+
+/// Parse an ephemeral tunnel's config file to extract hostname and target
+fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
+    let config_dir = crate::config::config_dir().ok()?;
+    let config_path = config_dir.join(format!("tunnel-{}.yml", tunnel_id));
+
+    if !config_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&config_path).ok()?;
+
+    // Parse simple YAML - look for hostname and service lines
+    // Format is:
+    //   ingress:
+    //     - hostname: example.com
+    //       service: http://localhost:8080
+    //     - service: http_status:404
+    let mut hostname = None;
+    let mut service = None;
+
+    for line in content.lines() {
+        // Strip leading whitespace and list marker
+        let line = line.trim().trim_start_matches('-').trim();
+
+        if line.starts_with("hostname:") {
+            hostname = line.strip_prefix("hostname:").map(|s| s.trim().to_string());
+        } else if line.starts_with("service:") {
+            let svc = line.strip_prefix("service:").map(|s| s.trim().to_string());
+            // Skip the fallback http_status:404 service, take first real service
+            if let Some(ref s) = svc {
+                if !s.contains("http_status") && service.is_none() {
+                    service = svc;
+                }
+            }
+        }
+    }
+
+    match (hostname, service) {
+        (Some(h), Some(s)) => Some((h, s)),
+        _ => None,
+    }
+}
+
+/// Input mode for the TUI
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    AddName,
+    AddTarget,
+    AddZone,
+    Confirm,
+}
+
+/// Whether a tunnel is managed (persistent) or ephemeral
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelKind {
+    /// Managed tunnel with launchd daemon
+    Managed,
+    /// Ephemeral tunnel (created with `ytunnel run`, not in state)
+    Ephemeral,
+}
+
+/// A tunnel entry with its runtime status
+#[derive(Debug, Clone)]
+pub struct TunnelEntry {
+    pub tunnel: PersistentTunnel,
+    pub status: TunnelStatus,
+    pub kind: TunnelKind,
+}
+
+/// Application state
+pub struct App {
+    /// Current input mode
+    pub input_mode: InputMode,
+    /// List of tunnels with status
+    pub tunnels: Vec<TunnelEntry>,
+    /// Currently selected tunnel index
+    pub selected: usize,
+    /// Log lines for the selected tunnel
+    pub logs: Vec<String>,
+    /// Input buffer for add dialog
+    pub input: String,
+    /// Temporary storage for new tunnel name during add flow
+    pub new_tunnel_name: Option<String>,
+    /// Temporary storage for new tunnel target during add flow
+    pub new_tunnel_target: Option<String>,
+    /// Available zones for selection
+    pub zones: Vec<config::ZoneConfig>,
+    /// Selected zone index during add flow
+    pub zone_selected: usize,
+    /// Confirmation message
+    pub confirm_message: Option<String>,
+    /// Action to perform on confirmation
+    pub pending_action: Option<PendingAction>,
+    /// Status message to display
+    pub status_message: Option<String>,
+    /// Should quit
+    pub should_quit: bool,
+    /// Config loaded
+    pub config: Option<config::Config>,
+    /// Whether we're importing (vs adding) a tunnel
+    pub is_importing: bool,
+}
+
+/// Actions that require confirmation
+#[derive(Debug, Clone)]
+pub enum PendingAction {
+    Delete(String),
+}
+
+impl App {
+    pub fn new() -> Self {
+        Self {
+            input_mode: InputMode::Normal,
+            tunnels: Vec::new(),
+            selected: 0,
+            logs: vec!["Select a tunnel to view logs".to_string()],
+            input: String::new(),
+            new_tunnel_name: None,
+            new_tunnel_target: None,
+            zones: Vec::new(),
+            zone_selected: 0,
+            confirm_message: None,
+            pending_action: None,
+            status_message: None,
+            should_quit: false,
+            config: None,
+            is_importing: false,
+        }
+    }
+
+    /// Load tunnels and their statuses
+    pub async fn load_tunnels(&mut self) -> Result<()> {
+        // Load config
+        self.config = config::load_config().ok();
+        if let Some(ref cfg) = self.config {
+            self.zones = cfg.zones.clone();
+        }
+
+        // Load tunnel state (managed tunnels)
+        let state = TunnelState::load()?;
+        let managed_names: std::collections::HashSet<String> = state
+            .tunnels
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        // Get status for each managed tunnel
+        let mut entries = Vec::new();
+        for tunnel in state.tunnels {
+            let status = daemon::get_daemon_status(&tunnel).await;
+            entries.push(TunnelEntry {
+                tunnel,
+                status,
+                kind: TunnelKind::Managed,
+            });
+        }
+
+        // Query Cloudflare for ephemeral tunnels (ytunnel-* not in state)
+        if let Some(ref cfg) = self.config {
+            let client = cloudflare::Client::new(&cfg.api_token);
+            if let Ok(cf_tunnels) = client.list_tunnels(&cfg.account_id).await {
+                for cf_tunnel in cf_tunnels {
+                    // Skip deleted tunnels
+                    if cf_tunnel.deleted_at.is_some() {
+                        continue;
+                    }
+
+                    // Only consider ytunnel-* tunnels
+                    if !cf_tunnel.name.starts_with("ytunnel-") {
+                        continue;
+                    }
+
+                    // Extract the short name (without ytunnel- prefix)
+                    let short_name = cf_tunnel.name.strip_prefix("ytunnel-").unwrap_or(&cf_tunnel.name);
+
+                    // Skip if already managed
+                    if managed_names.contains(short_name) {
+                        continue;
+                    }
+
+                    // This is an ephemeral tunnel - try to read its config file
+                    let (hostname, target) = parse_ephemeral_config(&cf_tunnel.id)
+                        .unwrap_or_else(|| (short_name.to_string(), "unknown".to_string()));
+
+                    // Try to determine the zone from the hostname
+                    let (zone_id, zone_name) = if hostname.contains('.') {
+                        // Try to match hostname to a known zone
+                        cfg.zones
+                            .iter()
+                            .find(|z| hostname.ends_with(&z.name))
+                            .map(|z| (z.id.clone(), z.name.clone()))
+                            .unwrap_or_default()
+                    } else {
+                        (String::new(), String::new())
+                    };
+
+                    let ephemeral = PersistentTunnel {
+                        name: short_name.to_string(),
+                        target,
+                        zone_id,
+                        zone_name,
+                        hostname,
+                        tunnel_id: cf_tunnel.id.clone(),
+                        enabled: false,
+                    };
+
+                    // Check if config file exists (means tunnel is actively running)
+                    let config_dir = crate::config::config_dir().ok();
+                    let config_exists = config_dir
+                        .map(|d| d.join(format!("tunnel-{}.yml", cf_tunnel.id)).exists())
+                        .unwrap_or(false);
+
+                    let status = if config_exists {
+                        TunnelStatus::Running
+                    } else if ephemeral.credentials_path().map(|p| p.exists()).unwrap_or(false) {
+                        TunnelStatus::Stopped // Has credentials but not running
+                    } else {
+                        TunnelStatus::Stopped
+                    };
+
+                    entries.push(TunnelEntry {
+                        tunnel: ephemeral,
+                        status,
+                        kind: TunnelKind::Ephemeral,
+                    });
+                }
+            }
+        }
+
+        self.tunnels = entries;
+
+        // Ensure selected index is valid
+        if self.selected >= self.tunnels.len() && !self.tunnels.is_empty() {
+            self.selected = self.tunnels.len() - 1;
+        }
+
+        // Load logs for selected tunnel
+        self.refresh_logs();
+
+        Ok(())
+    }
+
+    /// Refresh logs for the selected tunnel
+    pub fn refresh_logs(&mut self) {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            match entry.kind {
+                TunnelKind::Managed => {
+                    match daemon::read_log_tail(&entry.tunnel, 100) {
+                        Ok(lines) => self.logs = lines,
+                        Err(e) => self.logs = vec![format!("Error reading logs: {}", e)],
+                    }
+                }
+                TunnelKind::Ephemeral => {
+                    let has_config = entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
+                    self.logs = if has_config {
+                        vec![
+                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                            String::new(),
+                            format!("Hostname: {}", entry.tunnel.hostname),
+                            format!("Target:   {}", entry.tunnel.target),
+                            if !entry.tunnel.zone_name.is_empty() {
+                                format!("Zone:     {}", entry.tunnel.zone_name)
+                            } else {
+                                "Zone:     (will prompt)".to_string()
+                            },
+                            String::new(),
+                            "Press [m] to import as managed tunnel".to_string(),
+                            "Press [d] to delete from Cloudflare".to_string(),
+                        ]
+                    } else {
+                        vec![
+                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                            String::new(),
+                            "Config not found - tunnel may not be running.".to_string(),
+                            String::new(),
+                            "Press [m] to import (will prompt for target)".to_string(),
+                            "Press [d] to delete from Cloudflare".to_string(),
+                        ]
+                    };
+                }
+            }
+        } else {
+            self.logs = vec!["No tunnel selected".to_string()];
+        }
+    }
+
+    /// Move selection up
+    pub fn select_previous(&mut self) {
+        if !self.tunnels.is_empty() && self.selected > 0 {
+            self.selected -= 1;
+            self.refresh_logs();
+        }
+    }
+
+    /// Move selection down
+    pub fn select_next(&mut self) {
+        if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
+            self.selected += 1;
+            self.refresh_logs();
+        }
+    }
+
+    /// Start the add tunnel flow
+    pub fn start_add(&mut self) {
+        if self.config.is_none() {
+            self.status_message = Some("Run 'ytunnel init' first".to_string());
+            return;
+        }
+        self.input_mode = InputMode::AddName;
+        self.input.clear();
+        self.new_tunnel_name = None;
+        self.new_tunnel_target = None;
+        self.zone_selected = 0;
+        self.is_importing = false;
+    }
+
+    /// Cancel current input
+    pub fn cancel_input(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.input.clear();
+        self.new_tunnel_name = None;
+        self.new_tunnel_target = None;
+        self.confirm_message = None;
+        self.pending_action = None;
+    }
+
+    /// Move to next step in add flow
+    pub fn next_add_step(&mut self) {
+        match self.input_mode {
+            InputMode::AddName => {
+                if !self.input.is_empty() {
+                    // Check if name already exists
+                    if self.tunnels.iter().any(|t| t.tunnel.name == self.input) {
+                        self.status_message = Some(format!("Tunnel '{}' already exists", self.input));
+                        return;
+                    }
+                    self.new_tunnel_name = Some(self.input.clone());
+                    self.input.clear();
+                    self.input_mode = InputMode::AddTarget;
+                }
+            }
+            InputMode::AddTarget => {
+                if !self.input.is_empty() {
+                    self.new_tunnel_target = Some(self.input.clone());
+                    self.input.clear();
+                    self.input_mode = InputMode::AddZone;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Select zone in add flow (moves selection or confirms)
+    pub fn select_zone_next(&mut self) {
+        if !self.zones.is_empty() && self.zone_selected < self.zones.len() - 1 {
+            self.zone_selected += 1;
+        }
+    }
+
+    pub fn select_zone_prev(&mut self) {
+        if self.zone_selected > 0 {
+            self.zone_selected -= 1;
+        }
+    }
+
+    /// Complete the add tunnel flow
+    pub async fn complete_add(&mut self) -> Result<()> {
+        let name = self.new_tunnel_name.take().unwrap();
+        let target = self.new_tunnel_target.take().unwrap();
+        let zone = self.zones.get(self.zone_selected).unwrap().clone();
+
+        let cfg = self.config.as_ref().unwrap();
+        let client = cloudflare::Client::new(&cfg.api_token);
+
+        let tunnel_name = format!("ytunnel-{}", name);
+        let hostname = format!("{}.{}", name, zone.name);
+
+        self.status_message = Some(format!("Creating tunnel {}...", name));
+
+        // Check if tunnel exists, create if not
+        let (tunnel, _credentials_path) = match client
+            .get_tunnel_by_name(&cfg.account_id, &tunnel_name)
+            .await?
+        {
+            Some(t) => {
+                let creds_path = t.credentials_path()?;
+                if !creds_path.exists() {
+                    anyhow::bail!("Credentials missing for existing tunnel");
+                }
+                (t, creds_path)
+            }
+            None => {
+                let result = client.create_tunnel(&cfg.account_id, &tunnel_name).await?;
+                (result.tunnel, result.credentials_path)
+            }
+        };
+
+        // Ensure DNS record exists
+        client
+            .ensure_dns_record(&zone.id, &hostname, &tunnel.id)
+            .await?;
+
+        // Create persistent tunnel
+        let persistent = PersistentTunnel {
+            name: name.clone(),
+            target,
+            zone_id: zone.id,
+            zone_name: zone.name,
+            hostname,
+            tunnel_id: tunnel.id,
+            enabled: true,
+        };
+
+        // Write tunnel config
+        write_tunnel_config(&persistent)?;
+
+        // Install daemon
+        daemon::install_daemon(&persistent).await?;
+
+        // Save to state
+        let mut state = TunnelState::load()?;
+        state.add(persistent);
+        state.save()?;
+
+        // Start the daemon
+        daemon::start_daemon(&name).await?;
+
+        self.input_mode = InputMode::Normal;
+        self.status_message = Some(format!("Tunnel '{}' created and started", name));
+
+        // Reload tunnels
+        self.load_tunnels().await?;
+
+        // Select the new tunnel
+        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == name) {
+            self.selected = pos;
+            self.refresh_logs();
+        }
+
+        Ok(())
+    }
+
+    /// Start the selected tunnel
+    pub async fn start_selected(&mut self) -> Result<()> {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            if entry.kind == TunnelKind::Ephemeral {
+                self.status_message = Some("Cannot start ephemeral tunnel. Import it first with 'm'.".to_string());
+                return Ok(());
+            }
+
+            let name = entry.tunnel.name.clone();
+            self.status_message = Some(format!("Starting {}...", name));
+
+            // Ensure config file exists
+            write_tunnel_config(&entry.tunnel)?;
+
+            // Ensure daemon is installed
+            daemon::install_daemon(&entry.tunnel).await?;
+
+            // Start daemon
+            daemon::start_daemon(&name).await?;
+
+            // Update state
+            let mut state = TunnelState::load()?;
+            if let Some(t) = state.find_mut(&name) {
+                t.enabled = true;
+            }
+            state.save()?;
+
+            self.status_message = Some(format!("Started {}", name));
+            self.load_tunnels().await?;
+        }
+        Ok(())
+    }
+
+    /// Stop the selected tunnel
+    pub async fn stop_selected(&mut self) -> Result<()> {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            if entry.kind == TunnelKind::Ephemeral {
+                self.status_message = Some("Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal.".to_string());
+                return Ok(());
+            }
+
+            let name = entry.tunnel.name.clone();
+            self.status_message = Some(format!("Stopping {}...", name));
+
+            daemon::stop_daemon(&name).await?;
+
+            // Update state
+            let mut state = TunnelState::load()?;
+            if let Some(t) = state.find_mut(&name) {
+                t.enabled = false;
+            }
+            state.save()?;
+
+            self.status_message = Some(format!("Stopped {}", name));
+            self.load_tunnels().await?;
+        }
+        Ok(())
+    }
+
+    /// Check if selected tunnel is ephemeral
+    pub fn is_selected_ephemeral(&self) -> bool {
+        self.tunnels
+            .get(self.selected)
+            .map(|e| e.kind == TunnelKind::Ephemeral)
+            .unwrap_or(false)
+    }
+
+    /// Start import flow for ephemeral tunnel
+    /// Returns true if import was started (either directly or via dialog)
+    pub async fn start_import(&mut self) -> Result<()> {
+        if !self.is_selected_ephemeral() {
+            self.status_message = Some("Only ephemeral tunnels can be imported".to_string());
+            return Ok(());
+        }
+        if self.config.is_none() {
+            self.status_message = Some("Run 'ytunnel init' first".to_string());
+            return Ok(());
+        }
+
+        let entry = match self.tunnels.get(self.selected) {
+            Some(e) => e.clone(),
+            None => return Ok(()),
+        };
+
+        // Check if we have all the info needed for direct import
+        let has_target = !entry.tunnel.target.is_empty() && entry.tunnel.target != "unknown";
+        let has_zone = !entry.tunnel.zone_id.is_empty();
+
+        if has_target && has_zone {
+            // We have everything - import directly
+            self.status_message = Some(format!("Importing {}...", entry.tunnel.name));
+            self.direct_import(&entry.tunnel).await?;
+        } else if has_target {
+            // Have target but need zone - go to zone selection
+            self.new_tunnel_name = Some(entry.tunnel.name.clone());
+            self.new_tunnel_target = Some(entry.tunnel.target.clone());
+            self.zone_selected = 0;
+            self.is_importing = true;
+            self.input_mode = InputMode::AddZone;
+        } else {
+            // Need target - go to target input
+            self.new_tunnel_name = Some(entry.tunnel.name.clone());
+            self.new_tunnel_target = None;
+            self.zone_selected = 0;
+            self.is_importing = true;
+            self.input_mode = InputMode::AddTarget;
+        }
+
+        Ok(())
+    }
+
+    /// Directly import an ephemeral tunnel without prompts
+    async fn direct_import(&mut self, ephemeral: &PersistentTunnel) -> Result<()> {
+        let cfg = self.config.as_ref().unwrap();
+        let client = cloudflare::Client::new(&cfg.api_token);
+
+        // Ensure DNS record exists
+        client
+            .ensure_dns_record(&ephemeral.zone_id, &ephemeral.hostname, &ephemeral.tunnel_id)
+            .await?;
+
+        // Create the managed tunnel entry
+        let persistent = PersistentTunnel {
+            name: ephemeral.name.clone(),
+            target: ephemeral.target.clone(),
+            zone_id: ephemeral.zone_id.clone(),
+            zone_name: ephemeral.zone_name.clone(),
+            hostname: ephemeral.hostname.clone(),
+            tunnel_id: ephemeral.tunnel_id.clone(),
+            enabled: true,
+        };
+
+        // Write tunnel config for daemon
+        write_tunnel_config(&persistent)?;
+
+        // Install daemon
+        daemon::install_daemon(&persistent).await?;
+
+        // Save to state
+        let mut state = TunnelState::load()?;
+        state.add(persistent);
+        state.save()?;
+
+        // Note: Don't start daemon yet - the ephemeral tunnel is still running
+        // User should stop the ephemeral one first (Ctrl+C) then start via TUI
+
+        self.status_message = Some(format!(
+            "Imported '{}'. Stop the running tunnel (Ctrl+C) then start here.",
+            ephemeral.name
+        ));
+
+        // Reload tunnels
+        self.load_tunnels().await?;
+
+        // Select the imported tunnel
+        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == ephemeral.name) {
+            self.selected = pos;
+            self.refresh_logs();
+        }
+
+        Ok(())
+    }
+
+    /// Complete importing an ephemeral tunnel as managed
+    pub async fn complete_import(&mut self) -> Result<()> {
+        let name = self.new_tunnel_name.take().unwrap();
+        let target = self.new_tunnel_target.take().unwrap();
+        let zone = self.zones.get(self.zone_selected).unwrap().clone();
+
+        // Find the ephemeral tunnel to get its tunnel_id
+        let tunnel_id = self
+            .tunnels
+            .iter()
+            .find(|e| e.tunnel.name == name && e.kind == TunnelKind::Ephemeral)
+            .map(|e| e.tunnel.tunnel_id.clone())
+            .ok_or_else(|| anyhow::anyhow!("Ephemeral tunnel not found"))?;
+
+        let cfg = self.config.as_ref().unwrap();
+        let client = cloudflare::Client::new(&cfg.api_token);
+
+        let hostname = format!("{}.{}", name, zone.name);
+
+        self.status_message = Some(format!("Importing tunnel {}...", name));
+
+        // Ensure DNS record exists
+        client
+            .ensure_dns_record(&zone.id, &hostname, &tunnel_id)
+            .await?;
+
+        // Create persistent tunnel
+        let persistent = PersistentTunnel {
+            name: name.clone(),
+            target,
+            zone_id: zone.id,
+            zone_name: zone.name,
+            hostname,
+            tunnel_id,
+            enabled: true,
+        };
+
+        // Write tunnel config
+        write_tunnel_config(&persistent)?;
+
+        // Install daemon
+        daemon::install_daemon(&persistent).await?;
+
+        // Save to state
+        let mut state = TunnelState::load()?;
+        state.add(persistent);
+        state.save()?;
+
+        // Start the daemon
+        daemon::start_daemon(&name).await?;
+
+        self.input_mode = InputMode::Normal;
+        self.status_message = Some(format!("Imported '{}' as managed tunnel", name));
+
+        // Reload tunnels
+        self.load_tunnels().await?;
+
+        // Select the imported tunnel
+        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == name) {
+            self.selected = pos;
+            self.refresh_logs();
+        }
+
+        Ok(())
+    }
+
+    /// Request deletion of selected tunnel
+    pub fn request_delete(&mut self) {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            let msg = if entry.kind == TunnelKind::Ephemeral {
+                format!(
+                    "Delete ephemeral tunnel '{}'? This will remove it from Cloudflare. (y/n)",
+                    entry.tunnel.name
+                )
+            } else {
+                format!(
+                    "Delete tunnel '{}'? This will remove the DNS record and tunnel. (y/n)",
+                    entry.tunnel.name
+                )
+            };
+            self.confirm_message = Some(msg);
+            self.pending_action = Some(PendingAction::Delete(entry.tunnel.name.clone()));
+            self.input_mode = InputMode::Confirm;
+        }
+    }
+
+    /// Execute confirmed delete
+    pub async fn execute_delete(&mut self, name: String) -> Result<()> {
+        self.status_message = Some(format!("Deleting {}...", name));
+
+        // Find the entry to check if it's ephemeral
+        let entry = self.tunnels.iter().find(|e| e.tunnel.name == name);
+        let is_ephemeral = entry.map(|e| e.kind == TunnelKind::Ephemeral).unwrap_or(false);
+        let tunnel_id = entry.map(|e| e.tunnel.tunnel_id.clone());
+
+        if is_ephemeral {
+            // Ephemeral tunnel: just delete from Cloudflare
+            if let (Some(ref cfg), Some(tid)) = (&self.config, tunnel_id) {
+                let client = cloudflare::Client::new(&cfg.api_token);
+                client.delete_tunnel(&cfg.account_id, &tid).await.ok();
+
+                // Remove credentials file if it exists
+                let config_dir = crate::config::config_dir()?;
+                let creds_path = config_dir.join(format!("{}.json", tid));
+                std::fs::remove_file(&creds_path).ok();
+            }
+        } else {
+            // Managed tunnel: full cleanup
+            // Stop daemon
+            daemon::stop_daemon(&name).await?;
+
+            // Uninstall daemon
+            daemon::uninstall_daemon(&name).await?;
+
+            // Remove from state and get tunnel info
+            let mut state = TunnelState::load()?;
+            if let Some(tunnel) = state.remove(&name) {
+                // Delete from Cloudflare
+                if let Some(ref cfg) = self.config {
+                    let client = cloudflare::Client::new(&cfg.api_token);
+                    client.delete_tunnel(&cfg.account_id, &tunnel.tunnel_id).await.ok();
+                }
+
+                // Remove credentials file
+                if let Ok(creds_path) = tunnel.credentials_path() {
+                    std::fs::remove_file(&creds_path).ok();
+                }
+
+                // Remove config file
+                if let Ok(config_path) = tunnel.config_path() {
+                    std::fs::remove_file(&config_path).ok();
+                }
+
+                // Remove log file
+                if let Ok(log_path) = tunnel.log_path() {
+                    std::fs::remove_file(&log_path).ok();
+                }
+            }
+            state.save()?;
+        }
+
+        self.status_message = Some(format!("Deleted {}", name));
+        self.load_tunnels().await?;
+
+        Ok(())
+    }
+}
+
+/// Run the TUI application
+pub async fn run_tui() -> Result<()> {
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Create app and load data
+    let mut app = App::new();
+    if let Err(e) = app.load_tunnels().await {
+        // Still show TUI even if load fails
+        app.status_message = Some(format!("Error loading tunnels: {}", e));
+    }
+
+    // Main loop
+    let result = run_app(&mut terminal, &mut app).await;
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+async fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    loop {
+        terminal.draw(|f| ui::render(f, app))?;
+
+        // Poll for events with timeout for async refresh
+        if event::poll(Duration::from_millis(250))? {
+            if let Event::Key(key) = event::read()? {
+                // Only handle key press events (not release)
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                match app.input_mode {
+                    InputMode::Normal => match key.code {
+                        KeyCode::Char('q') => {
+                            app.should_quit = true;
+                        }
+                        KeyCode::Char('a') => {
+                            app.start_add();
+                        }
+                        KeyCode::Char('s') => {
+                            if let Err(e) = app.start_selected().await {
+                                app.status_message = Some(format!("Error: {}", e));
+                            }
+                        }
+                        KeyCode::Char('S') => {
+                            if let Err(e) = app.stop_selected().await {
+                                app.status_message = Some(format!("Error: {}", e));
+                            }
+                        }
+                        KeyCode::Char('d') => {
+                            app.request_delete();
+                        }
+                        KeyCode::Char('m') => {
+                            if let Err(e) = app.start_import().await {
+                                app.status_message = Some(format!("Error: {}", e));
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            if let Err(e) = app.load_tunnels().await {
+                                app.status_message = Some(format!("Error: {}", e));
+                            } else {
+                                app.status_message = Some("Refreshed".to_string());
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.select_previous();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.select_next();
+                        }
+                        _ => {}
+                    },
+                    InputMode::AddName | InputMode::AddTarget => match key.code {
+                        KeyCode::Esc => {
+                            app.cancel_input();
+                        }
+                        KeyCode::Enter => {
+                            app.next_add_step();
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input.push(c);
+                        }
+                        _ => {}
+                    },
+                    InputMode::AddZone => match key.code {
+                        KeyCode::Esc => {
+                            app.cancel_input();
+                        }
+                        KeyCode::Enter => {
+                            let result = if app.is_importing {
+                                app.complete_import().await
+                            } else {
+                                app.complete_add().await
+                            };
+                            if let Err(e) = result {
+                                app.status_message = Some(format!("Error: {}", e));
+                                app.input_mode = InputMode::Normal;
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.select_zone_prev();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.select_zone_next();
+                        }
+                        _ => {}
+                    },
+                    InputMode::Confirm => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            if let Some(PendingAction::Delete(name)) = app.pending_action.take() {
+                                app.confirm_message = None;
+                                app.input_mode = InputMode::Normal;
+                                if let Err(e) = app.execute_delete(name).await {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            app.cancel_input();
+                        }
+                        _ => {}
+                    },
+                }
+            }
+        }
+
+        if app.should_quit {
+            return Ok(());
+        }
+    }
+}

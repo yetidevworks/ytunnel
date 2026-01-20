@@ -33,6 +33,9 @@ pub struct PersistentTunnel {
     pub hostname: String,
     pub tunnel_id: String,
     pub enabled: bool,
+    /// Port for cloudflared metrics endpoint (optional, calculated if not set)
+    #[serde(default)]
+    pub metrics_port: Option<u16>,
 }
 
 impl PersistentTunnel {
@@ -54,6 +57,21 @@ impl PersistentTunnel {
         let config_dir = config::config_dir()?;
         let logs_dir = config_dir.join("logs");
         Ok(logs_dir.join(format!("{}.log", self.name)))
+    }
+
+    /// Get the metrics port for this tunnel (calculates from name hash if not set)
+    pub fn get_metrics_port(&self) -> u16 {
+        self.metrics_port.unwrap_or_else(|| {
+            // Calculate a port based on the tunnel name hash
+            // Range: 21000-21999 to avoid conflicts with cloudflared defaults (20241-20245)
+            let hash: u32 = self.name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+            21000 + (hash % 1000) as u16
+        })
+    }
+
+    /// Get the metrics URL for this tunnel
+    pub fn metrics_url(&self) -> String {
+        format!("http://localhost:{}/metrics", self.get_metrics_port())
     }
 }
 

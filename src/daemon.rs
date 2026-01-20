@@ -30,6 +30,7 @@ fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
     let config_path = tunnel.config_path()?;
     let log_path = tunnel.log_path()?;
     let label = launchd_label(&tunnel.name);
+    let metrics_port = tunnel.get_metrics_port();
 
     // Find cloudflared path
     let cloudflared_path = which_cloudflared().unwrap_or_else(|| "/opt/homebrew/bin/cloudflared".to_string());
@@ -47,6 +48,8 @@ fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
         <string>tunnel</string>
         <string>--config</string>
         <string>{config}</string>
+        <string>--metrics</string>
+        <string>localhost:{metrics_port}</string>
         <string>run</string>
     </array>
     <key>RunAtLoad</key>
@@ -68,6 +71,7 @@ fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
         label = label,
         cloudflared = cloudflared_path,
         config = config_path.display(),
+        metrics_port = metrics_port,
         log = log_path.display()
     );
 

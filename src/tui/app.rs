@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::cloudflare;
 use crate::config;
 use crate::daemon;
+use crate::metrics::TunnelMetrics;
 use crate::state::{PersistentTunnel, TunnelState, TunnelStatus, write_tunnel_config};
 
 use super::ui;
@@ -86,6 +87,7 @@ pub struct TunnelEntry {
     pub tunnel: PersistentTunnel,
     pub status: TunnelStatus,
     pub kind: TunnelKind,
+    pub metrics: Option<TunnelMetrics>,
 }
 
 /// Application state
@@ -169,10 +171,18 @@ impl App {
         let mut entries = Vec::new();
         for tunnel in state.tunnels {
             let status = daemon::get_daemon_status(&tunnel).await;
+            // Fetch metrics for running tunnels
+            let metrics = if status == TunnelStatus::Running {
+                let m = TunnelMetrics::fetch(&tunnel.metrics_url()).await;
+                if m.available { Some(m) } else { None }
+            } else {
+                None
+            };
             entries.push(TunnelEntry {
                 tunnel,
                 status,
                 kind: TunnelKind::Managed,
+                metrics,
             });
         }
 
@@ -223,6 +233,7 @@ impl App {
                         hostname,
                         tunnel_id: cf_tunnel.id.clone(),
                         enabled: false,
+                        metrics_port: None,
                     };
 
                     // Check if config file exists (means tunnel is actively running)
@@ -243,6 +254,7 @@ impl App {
                         tunnel: ephemeral,
                         status,
                         kind: TunnelKind::Ephemeral,
+                        metrics: None,
                     });
                 }
             }
@@ -303,6 +315,21 @@ impl App {
         } else {
             self.logs = vec!["No tunnel selected".to_string()];
         }
+    }
+
+    /// Refresh metrics for the selected tunnel
+    pub async fn refresh_metrics(&mut self) {
+        if let Some(entry) = self.tunnels.get_mut(self.selected) {
+            if entry.kind == TunnelKind::Managed && entry.status == TunnelStatus::Running {
+                let metrics = TunnelMetrics::fetch(&entry.tunnel.metrics_url()).await;
+                entry.metrics = if metrics.available { Some(metrics) } else { None };
+            }
+        }
+    }
+
+    /// Get metrics for the selected tunnel
+    pub fn selected_metrics(&self) -> Option<&TunnelMetrics> {
+        self.tunnels.get(self.selected).and_then(|e| e.metrics.as_ref())
     }
 
     /// Move selection up
@@ -430,6 +457,7 @@ impl App {
             hostname,
             tunnel_id: tunnel.id,
             enabled: true,
+            metrics_port: None,
         };
 
         // Write tunnel config
@@ -591,6 +619,7 @@ impl App {
             hostname: ephemeral.hostname.clone(),
             tunnel_id: ephemeral.tunnel_id.clone(),
             enabled: true,
+            metrics_port: None,
         };
 
         // Write tunnel config for daemon
@@ -659,6 +688,7 @@ impl App {
             hostname,
             tunnel_id,
             enabled: true,
+            metrics_port: None,
         };
 
         // Write tunnel config
@@ -807,8 +837,17 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let mut last_metrics_refresh = std::time::Instant::now();
+    let metrics_refresh_interval = Duration::from_secs(5);
+
     loop {
         terminal.draw(|f| ui::render(f, app))?;
+
+        // Refresh metrics periodically
+        if last_metrics_refresh.elapsed() >= metrics_refresh_interval {
+            app.refresh_metrics().await;
+            last_metrics_refresh = std::time::Instant::now();
+        }
 
         // Poll for events with timeout for async refresh
         if event::poll(Duration::from_millis(250))? {

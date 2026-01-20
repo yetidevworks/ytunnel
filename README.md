@@ -1,11 +1,11 @@
 # YTunnel
 
 ```
-  ___ ___ _______                           __ 
+  ___ ___ _______                           __
  |   |   |_     _|.--.--.-----.-----.-----.|  |
   \     /  |   |  |  |  |     |     |  -__||  |
    |___|   |___|  |_____|__|__|__|__|_____||__|
-                                               
+
 ```
 
 A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok, but using your own Cloudflare domain with persistent URLs and a dashboard to manage them.
@@ -25,6 +25,7 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
    ```bash
    brew install cloudflare/cloudflare/cloudflared
    ```
+   > **Note:** You only need to *install* cloudflared. Do NOT run it as a brew service (`brew services start cloudflared`). YTunnel manages cloudflared processes directly.
 
 2. **Cloudflare API Token** with these permissions:
    - Zone:Read
@@ -33,7 +34,7 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
 
    Create one at: https://dash.cloudflare.com/profile/api-tokens
 
-3. **A domain** managed by Cloudflare
+3. **A domain** managed by Cloudflare (free tier works)
 
 ## Installation
 
@@ -54,21 +55,85 @@ ytunnel
 ytunnel add myapp localhost:3000 --start
 ```
 
+## Architecture
+
+### How YTunnel Works
+
+YTunnel is a **management tool**, not a daemon itself. Here's how the pieces fit together:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         ytunnel (CLI/TUI)                       │
+│         Management tool - runs only when you invoke it          │
+└─────────────────────────────────────────────────────────────────┘
+                                  │
+                    Creates & manages configs for
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      launchd (macOS)                            │
+│              System service manager - always running            │
+│                                                                 │
+│   Manages plists in ~/Library/LaunchAgents/:                    │
+│   • com.ytunnel.myapp.plist                                     │
+│   • com.ytunnel.api.plist                                       │
+└─────────────────────────────────────────────────────────────────┘
+                                  │
+                    Starts/stops/monitors
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    cloudflared processes                        │
+│            One process per tunnel - runs in background          │
+│                                                                 │
+│   • cloudflared tunnel --config myapp.yml run                   │
+│   • cloudflared tunnel --config api.yml run                     │
+└─────────────────────────────────────────────────────────────────┘
+                                  │
+                         Connects to
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Cloudflare Edge                            │
+│                  Routes traffic to your tunnels                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Persistence Model
+
+| Mode | How it runs | Survives reboot? | Use case |
+|------|-------------|------------------|----------|
+| **Ephemeral** (`ytunnel run`) | Foreground process | No | Quick testing, one-off tunnels |
+| **Persistent** (`ytunnel add --start`) | launchd daemon | Yes* | Production, always-on services |
+
+*Tunnels are configured with `RunAtLoad: false` by default. They start when you run `ytunnel start` and keep running until you `ytunnel stop` or reboot. To auto-start on login, you can modify the plist.
+
+### What YTunnel Creates
+
+When you run `ytunnel add myapp localhost:3000 --start`:
+
+1. **Cloudflare Tunnel** - Created via API, persists in your Cloudflare account
+2. **DNS Record** - CNAME pointing `myapp.yourdomain.com` → tunnel
+3. **Credentials** - `~/Library/Application Support/ytunnel/<tunnel-id>.json`
+4. **Config** - `~/Library/Application Support/ytunnel/tunnel-configs/myapp.yml`
+5. **Plist** - `~/Library/LaunchAgents/com.ytunnel.myapp.plist`
+6. **State** - Entry in `~/Library/Application Support/ytunnel/tunnels.toml`
+
+The plist tells launchd to run cloudflared with your config. Logs go to the logs directory.
+
 ## TUI Dashboard
 
 Run `ytunnel` with no arguments to open the interactive dashboard:
 
 ```
-┌─ ytunnel ──────────────────────────────────────────────────────┐
-│ Tunnels                          │ Logs: myapp                 │
-│ ─────────────────────────────────│─────────────────────────────│
-│ ● myapp    myapp.example.com     │ 2024-01-20 10:30:21 INF ... │
-│ ○ api      api.example.com       │ 2024-01-20 10:30:22 INF ... │
-│   staging  staging.example.com   │ 2024-01-20 10:30:23 INF ... │
-│                                  │                             │
-├──────────────────────────────────┴─────────────────────────────┤
-│ [a]dd  [s]tart  [S]top  [d]elete  [r]efresh  [q]uit            │
-└────────────────────────────────────────────────────────────────┘
+┌─ Tunnels (2) ─────────────────┬─ Logs: myapp ─────────────────────┐
+│ ● myapp    myapp.example.com  │ 2024-01-20 10:30:21 INF Connected │
+│ ○ api      api.example.com    │ 2024-01-20 10:30:22 INF Ready     │
+│                               │                                    │
+├───────────────────────────────┴────────────────────────────────────┤
+│ Started myapp                                                      │
+│ [a]dd  [s]tart  [S]top  [d]elete  [r]efresh  [q]uit               │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 **Status indicators:**
@@ -77,14 +142,16 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 - `✗` Error (red)
 
 **Keyboard shortcuts:**
-- `a` - Add a new tunnel
-- `s` - Start selected tunnel
-- `S` - Stop selected tunnel
-- `d` - Delete selected tunnel
-- `m` - Import ephemeral tunnel as managed
-- `r` - Refresh status
-- `↑/↓` or `j/k` - Navigate list
-- `q` - Quit
+| Key | Action |
+|-----|--------|
+| `a` | Add a new tunnel |
+| `s` | Start selected tunnel |
+| `S` | Stop selected tunnel |
+| `d` | Delete selected tunnel |
+| `m` | Import ephemeral tunnel as managed |
+| `r` | Refresh status |
+| `↑/↓` or `j/k` | Navigate list |
+| `q` | Quit |
 
 Tunnels continue running in the background after you close the TUI.
 
@@ -126,11 +193,8 @@ For quick one-off tunnels that stop when you press Ctrl+C:
 # Auto-generated subdomain (ytunnel-abc123.example.com)
 ytunnel run localhost:3000
 
-# Named subdomain (license.example.com)
-ytunnel run license localhost:3000
-
-# Nested subdomain (license.tunnel.example.com)
-ytunnel run license.tunnel localhost:3000
+# Named subdomain (myapp.example.com)
+ytunnel run myapp localhost:3000
 
 # Different zone
 ytunnel run api -z dev.example.com localhost:8080
@@ -146,35 +210,22 @@ ytunnel zones
 ytunnel zones default dev.example.com
 ```
 
-## How It Works
-
-### Persistent Tunnels
-
-When you add a tunnel with `ytunnel add myapp localhost:3000 --start`:
-
-1. Creates (or reuses) a named Cloudflare tunnel via API
-2. Saves tunnel credentials to `~/.config/ytunnel/<tunnel-id>.json`
-3. Creates/updates a CNAME DNS record pointing to the tunnel
-4. Generates a tunnel config at `~/.config/ytunnel/tunnel-configs/myapp.yml`
-5. Installs a launchd plist at `~/Library/LaunchAgents/com.ytunnel.myapp.plist`
-6. Starts the tunnel daemon
-
-The tunnel continues running in the background, survives terminal closes, and can be configured to start on login.
-
-### Ephemeral Tunnels
-
-When you run `ytunnel run myapp localhost:3000`:
-
-1. Creates (or reuses) a named Cloudflare tunnel
-2. Creates/updates the DNS record
-3. Runs `cloudflared` in the foreground
-4. Stops when you press Ctrl+C (tunnel remains registered for reuse)
-
 ## Configuration
+
+### File Locations (macOS)
+
+| Path | Purpose |
+|------|---------|
+| `~/Library/Application Support/ytunnel/config.toml` | API credentials and zones |
+| `~/Library/Application Support/ytunnel/tunnels.toml` | Persistent tunnel state |
+| `~/Library/Application Support/ytunnel/<tunnel-id>.json` | Cloudflare tunnel credentials |
+| `~/Library/Application Support/ytunnel/tunnel-configs/<name>.yml` | cloudflared config files |
+| `~/Library/Application Support/ytunnel/logs/<name>.log` | Tunnel daemon logs |
+| `~/Library/LaunchAgents/com.ytunnel.<name>.plist` | launchd service files |
 
 ### Main Config
 
-`~/.config/ytunnel/config.toml`:
+`~/Library/Application Support/ytunnel/config.toml`:
 
 ```toml
 api_token = "your-token"
@@ -189,7 +240,7 @@ name = "example.com"
 
 ### Tunnel State
 
-`~/.config/ytunnel/tunnels.toml`:
+`~/Library/Application Support/ytunnel/tunnels.toml`:
 
 ```toml
 [[tunnels]]
@@ -202,23 +253,12 @@ tunnel_id = "cf-tunnel-id"
 enabled = true
 ```
 
-### File Locations
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/ytunnel/config.toml` | API credentials and zones |
-| `~/.config/ytunnel/tunnels.toml` | Persistent tunnel state |
-| `~/.config/ytunnel/<tunnel-id>.json` | Cloudflare tunnel credentials |
-| `~/.config/ytunnel/tunnel-configs/<name>.yml` | cloudflared config files |
-| `~/.config/ytunnel/logs/<name>.log` | Tunnel daemon logs |
-| `~/Library/LaunchAgents/com.ytunnel.<name>.plist` | launchd service files |
-
 ## Troubleshooting
 
 ### Check tunnel status
 
 ```bash
-# Via CLI
+# Via ytunnel
 ytunnel list
 
 # Via launchctl
@@ -231,13 +271,28 @@ launchctl list | grep ytunnel
 # In TUI: select tunnel and view right pane
 
 # Or directly
-tail -f ~/.config/ytunnel/logs/myapp.log
+tail -f ~/Library/Application\ Support/ytunnel/logs/myapp.log
 ```
 
-### Manually stop a tunnel
+### Tunnel won't start
+
+1. Check if cloudflared is installed: `cloudflared --version`
+2. Check the log file for errors
+3. Verify credentials exist: `ls ~/Library/Application\ Support/ytunnel/*.json`
+4. Try running manually: `cloudflared tunnel --config <config-path> run`
+
+### Manually manage a tunnel
 
 ```bash
+# Stop
 launchctl unload ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+
+# Start
+launchctl load ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+
+# Remove completely
+launchctl unload ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+rm ~/Library/LaunchAgents/com.ytunnel.myapp.plist
 ```
 
 ## License

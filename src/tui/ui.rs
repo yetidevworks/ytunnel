@@ -7,10 +7,11 @@ use ratatui::{
 };
 
 use super::app::{App, InputMode, TunnelKind};
+use crate::metrics::TunnelMetrics;
 use crate::state::TunnelStatus;
 
 pub fn render(f: &mut Frame, app: &App) {
-    // Main layout: tunnels on left, logs on right, status line, help bar at bottom
+    // Main layout: tunnels on left, logs/metrics on right, status line, help bar at bottom
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -28,8 +29,23 @@ pub fn render(f: &mut Frame, app: &App) {
     // Render tunnels list
     render_tunnels(f, app, content_chunks[0]);
 
-    // Render logs panel
-    render_logs(f, app, content_chunks[1]);
+    // Right panel: logs and optional metrics
+    let has_metrics = app.selected_metrics().is_some();
+    if has_metrics {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(7)])
+            .split(content_chunks[1]);
+
+        // Render logs panel
+        render_logs(f, app, right_chunks[0]);
+
+        // Render metrics panel
+        render_metrics(f, app.selected_metrics(), right_chunks[1]);
+    } else {
+        // Just render logs panel
+        render_logs(f, app, content_chunks[1]);
+    }
 
     // Render status line
     render_status_line(f, app, main_chunks[1]);
@@ -163,6 +179,71 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(logs, area);
+}
+
+fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, area: Rect) {
+    let metrics = match metrics {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Format response codes
+    let mut codes: Vec<_> = metrics.response_codes.iter().collect();
+    codes.sort_by_key(|(k, _)| *k);
+    let codes_str: String = codes
+        .iter()
+        .map(|(code, count)| format!("{}:{}", code, count))
+        .collect::<Vec<_>>()
+        .join("  ");
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Requests: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", metrics.total_requests),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("    Errors: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", metrics.request_errors),
+                Style::default().fg(if metrics.request_errors > 0 { Color::Red } else { Color::Green }),
+            ),
+            Span::styled("    Active: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", metrics.concurrent_requests),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("HA Connections: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", metrics.ha_connections),
+                Style::default().fg(if metrics.ha_connections >= 4 { Color::Green } else { Color::Yellow }),
+            ),
+            Span::styled("    Edge: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                metrics.locations_string(),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Status Codes: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if codes_str.is_empty() { "none".to_string() } else { codes_str },
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+
+    let metrics_widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Metrics ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+
+    f.render_widget(metrics_widget, area);
 }
 
 fn render_status_line(f: &mut Frame, app: &App, area: Rect) {

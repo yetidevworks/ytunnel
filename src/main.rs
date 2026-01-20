@@ -2,6 +2,7 @@ mod cli;
 mod cloudflare;
 mod config;
 mod daemon;
+mod metrics;
 mod state;
 mod tui;
 mod tunnel;
@@ -294,6 +295,7 @@ async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool
         hostname: hostname.clone(),
         tunnel_id: cf_tunnel.id,
         enabled: start,
+        metrics_port: None,
     };
 
     // Write tunnel config

@@ -169,14 +169,14 @@ jobs:
       - name: Write formula and push
         env:
           GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          VER: ${{ steps.cargo.outputs.version }}
+          DARWIN_ARM64_SHA: ${{ steps.shas.outputs.darwin_arm64_sha }}
+          DARWIN_X86_64_SHA: ${{ steps.shas.outputs.darwin_x86_64_sha }}
+          LINUX_X86_64_SHA: ${{ steps.shas.outputs.linux_x86_64_sha }}
+          LINUX_AARCH64_SHA: ${{ steps.shas.outputs.linux_aarch64_sha }}
         run: |
           set -euo pipefail
-          VER='${{ steps.cargo.outputs.version }}'
           TAP_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          DARWIN_ARM64_SHA='${{ steps.shas.outputs.darwin_arm64_sha }}'
-          DARWIN_X86_64_SHA='${{ steps.shas.outputs.darwin_x86_64_sha }}'
-          LINUX_X86_64_SHA='${{ steps.shas.outputs.linux_x86_64_sha }}'
-          LINUX_AARCH64_SHA='${{ steps.shas.outputs.linux_aarch64_sha }}'
 
           if [[ -z "${DARWIN_ARM64_SHA}" || -z "${DARWIN_X86_64_SHA}" || -z "${LINUX_X86_64_SHA}" || -z "${LINUX_AARCH64_SHA}" ]]; then
             echo "Missing required SHAs for Homebrew formula." >&2
@@ -188,44 +188,45 @@ jobs:
 
           cd tap
           mkdir -p "$(dirname "${FORMULA_PATH}")"
-          cat <<EOF > "${FORMULA_PATH}"
-class Ytunnel < Formula
-  desc "TUI-first CLI for managing Cloudflare Tunnels with custom domains"
-  homepage "https://github.com/${GITHUB_REPOSITORY}"
-  license "MIT"
-  version "${VER}"
 
-  on_macos do
-    on_arm do
-      url "${TAP_URL}/ytunnel-darwin-aarch64.tar.gz"
-      sha256 "${DARWIN_ARM64_SHA}"
-    end
-    on_intel do
-      url "${TAP_URL}/ytunnel-darwin-x86_64.tar.gz"
-      sha256 "${DARWIN_X86_64_SHA}"
-    end
-  end
-
-  on_linux do
-    on_intel do
-      url "${TAP_URL}/ytunnel-linux-x86_64.tar.gz"
-      sha256 "${LINUX_X86_64_SHA}"
-    end
-    on_arm do
-      url "${TAP_URL}/ytunnel-linux-aarch64.tar.gz"
-      sha256 "${LINUX_AARCH64_SHA}"
-    end
-  end
-
-  def install
-    bin.install "ytunnel"
-  end
-
-  test do
-    assert_match "ytunnel", shell_output("#{bin}/ytunnel --version")
-  end
-end
-EOF
+          # Write formula using printf to avoid YAML parsing issues with heredoc
+          printf '%s\n' \
+            "class Ytunnel < Formula" \
+            "  desc \"TUI-first CLI for managing Cloudflare Tunnels with custom domains\"" \
+            "  homepage \"https://github.com/${GITHUB_REPOSITORY}\"" \
+            "  license \"MIT\"" \
+            "  version \"${VER}\"" \
+            "" \
+            "  on_macos do" \
+            "    on_arm do" \
+            "      url \"${TAP_URL}/ytunnel-darwin-aarch64.tar.gz\"" \
+            "      sha256 \"${DARWIN_ARM64_SHA}\"" \
+            "    end" \
+            "    on_intel do" \
+            "      url \"${TAP_URL}/ytunnel-darwin-x86_64.tar.gz\"" \
+            "      sha256 \"${DARWIN_X86_64_SHA}\"" \
+            "    end" \
+            "  end" \
+            "" \
+            "  on_linux do" \
+            "    on_intel do" \
+            "      url \"${TAP_URL}/ytunnel-linux-x86_64.tar.gz\"" \
+            "      sha256 \"${LINUX_X86_64_SHA}\"" \
+            "    end" \
+            "    on_arm do" \
+            "      url \"${TAP_URL}/ytunnel-linux-aarch64.tar.gz\"" \
+            "      sha256 \"${LINUX_AARCH64_SHA}\"" \
+            "    end" \
+            "  end" \
+            "" \
+            "  def install" \
+            "    bin.install \"ytunnel\"" \
+            "  end" \
+            "" \
+            "  test do" \
+            "    assert_match \"ytunnel\", shell_output(\"#{bin}/ytunnel --version\")" \
+            "  end" \
+            "end" > "${FORMULA_PATH}"
 
           git config user.name "ytunnel-bot"
           git config user.email "ytunnel-bot@users.noreply.github.com"

@@ -184,10 +184,14 @@ jobs:
           fi
 
           rm -rf tap
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+
+          # Configure git credentials
+          git config --global credential.helper store
+          echo "https://x-access-token:${GH_TOKEN}@github.com" > ~/.git-credentials
+
+          git clone "https://github.com/${TAP_REPO}.git" tap
 
           cd tap
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git"
           mkdir -p "$(dirname "${FORMULA_PATH}")"
 
           # Write formula using printf to avoid YAML parsing issues with heredoc
@@ -237,4 +241,4 @@ jobs:
             exit 0
           fi
           git commit -m "ytunnel ${VER}: update Homebrew formula"
-          git push origin HEAD:main
+          git push origin main

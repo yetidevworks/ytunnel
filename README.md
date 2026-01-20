@@ -409,6 +409,11 @@ systemctl --user daemon-reload
 
 ## Changelog
 
+### v0.3.0
+
+- **Health indicators in tunnel list** - Show red ⚠ warning next to unhealthy tunnels
+- **Check all tunnels health** - Periodic health checks now run for all running tunnels, not just selected
+
 ### v0.2.0
 
 - **Remote desktop support** - Fixed TUI input issues when using remote desktop/screen sharing (supports key repeat events and paste input)

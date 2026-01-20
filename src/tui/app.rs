@@ -421,19 +421,38 @@ impl App {
 
     /// Check health of the selected tunnel by making an HTTP request
     pub async fn check_health(&mut self) {
-        if let Some(entry) = self.tunnels.get_mut(self.selected) {
+        self.check_health_for_index(self.selected).await;
+    }
+
+    /// Check health of all running tunnels
+    pub async fn check_all_health(&mut self) {
+        for i in 0..self.tunnels.len() {
+            if self.tunnels[i].status == TunnelStatus::Running {
+                self.check_health_for_index(i).await;
+            }
+        }
+    }
+
+    /// Check health for a specific tunnel by index
+    async fn check_health_for_index(&mut self, index: usize) {
+        if let Some(entry) = self.tunnels.get_mut(index) {
             if entry.status != TunnelStatus::Running {
                 entry.health = HealthStatus::Unknown;
-                self.status_message = Some("Tunnel not running".to_string());
+                if index == self.selected {
+                    self.status_message = Some("Tunnel not running".to_string());
+                }
                 return;
             }
 
             let previous_health = entry.health;
             let tunnel_name = entry.tunnel.name.clone();
             let hostname = entry.tunnel.hostname.clone();
+            let is_selected = index == self.selected;
 
             entry.health = HealthStatus::Checking;
-            self.status_message = Some(format!("Checking health of {}...", tunnel_name));
+            if is_selected {
+                self.status_message = Some(format!("Checking health of {}...", tunnel_name));
+            }
 
             let url = format!("https://{}", hostname);
 
@@ -446,7 +465,9 @@ impl App {
             let result = match client {
                 Ok(c) => c.head(&url).send().await,
                 Err(_) => {
-                    entry.health = HealthStatus::Unhealthy;
+                    if let Some(entry) = self.tunnels.get_mut(index) {
+                        entry.health = HealthStatus::Unhealthy;
+                    }
                     self.show_health_result(&tunnel_name, previous_health, HealthStatus::Unhealthy);
                     return;
                 }
@@ -461,7 +482,9 @@ impl App {
                 Err(_) => HealthStatus::Unhealthy,
             };
 
-            entry.health = new_health;
+            if let Some(entry) = self.tunnels.get_mut(index) {
+                entry.health = new_health;
+            }
             self.show_health_result(&tunnel_name, previous_health, new_health);
         }
     }
@@ -1203,10 +1226,8 @@ pub async fn run_tui() -> Result<()> {
         app.status_message = Some(format!("Error loading tunnels: {}", e));
     }
 
-    // Initial health check for selected tunnel
-    if app.selected_needs_health_check() {
-        app.check_health().await;
-    }
+    // Initial health check for all running tunnels
+    app.check_all_health().await;
 
     // Main loop
     let result = run_app(&mut terminal, &mut app).await;
@@ -1242,9 +1263,9 @@ async fn run_app(
             last_metrics_refresh = std::time::Instant::now();
         }
 
-        // Check health less frequently
+        // Check health of all running tunnels less frequently
         if last_health_check.elapsed() >= health_check_interval {
-            app.check_health().await;
+            app.check_all_health().await;
             last_health_check = std::time::Instant::now();
         }
 

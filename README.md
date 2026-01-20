@@ -59,7 +59,13 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
 
 ## Installation
 
-### From crates.io (recommended)
+### Homebrew (recommended)
+
+```bash
+brew install yetidevworks/ytunnel/ytunnel
+```
+
+### From crates.io
 
 ```bash
 cargo install ytunnel
@@ -408,6 +414,10 @@ systemctl --user daemon-reload
 ```
 
 ## Changelog
+
+### v0.3.1
+
+- **Homebrew tap support** - Install via `brew install yetidevworks/ytunnel/ytunnel`
 
 ### v0.3.0
 

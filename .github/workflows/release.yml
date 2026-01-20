@@ -7,6 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TAP_REPO: yetidevworks/homebrew-ytunnel
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -70,8 +74,6 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,3 +107,132 @@ jobs:
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  update-formula:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      FORMULA_PATH: Formula/ytunnel.rb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+
+      - name: Compute SHAs
+        id: shas
+        run: |
+          set -euo pipefail
+          hash() { sha256sum "$1" | awk '{print $1}'; }
+
+          f=$(find /tmp/artifacts -name '*darwin-aarch64.tar.gz' -print -quit)
+          [[ -f "$f" ]] && echo "darwin_arm64_sha=$(hash "$f")" >> $GITHUB_OUTPUT
+
+          f=$(find /tmp/artifacts -name '*darwin-x86_64.tar.gz' -print -quit)
+          [[ -f "$f" ]] && echo "darwin_x86_64_sha=$(hash "$f")" >> $GITHUB_OUTPUT
+
+          f=$(find /tmp/artifacts -name '*linux-x86_64.tar.gz' -print -quit)
+          [[ -f "$f" ]] && echo "linux_x86_64_sha=$(hash "$f")" >> $GITHUB_OUTPUT
+
+          f=$(find /tmp/artifacts -name '*linux-aarch64.tar.gz' -print -quit)
+          [[ -f "$f" ]] && echo "linux_aarch64_sha=$(hash "$f")" >> $GITHUB_OUTPUT
+
+      - name: Read version from Cargo.toml
+        id: cargo
+        run: |
+          set -euo pipefail
+          VERSION=$(awk '
+            /^\[package\]/ {pkg=1; next}
+            /^\[/ && $0 !~ /^\[package\]/ {pkg=0}
+            pkg && $1 == "version" && $2 == "=" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches tag
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION='${{ steps.cargo.outputs.version }}'
+          if [[ "${TAG_VERSION}" != "${CARGO_VERSION}" ]]; then
+            echo "Tag version (${TAG_VERSION}) does not match Cargo version (${CARGO_VERSION})." >&2
+            exit 1
+          fi
+
+      - name: Write formula and push
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER='${{ steps.cargo.outputs.version }}'
+          TAP_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          DARWIN_ARM64_SHA='${{ steps.shas.outputs.darwin_arm64_sha }}'
+          DARWIN_X86_64_SHA='${{ steps.shas.outputs.darwin_x86_64_sha }}'
+          LINUX_X86_64_SHA='${{ steps.shas.outputs.linux_x86_64_sha }}'
+          LINUX_AARCH64_SHA='${{ steps.shas.outputs.linux_aarch64_sha }}'
+
+          if [[ -z "${DARWIN_ARM64_SHA}" || -z "${DARWIN_X86_64_SHA}" || -z "${LINUX_X86_64_SHA}" || -z "${LINUX_AARCH64_SHA}" ]]; then
+            echo "Missing required SHAs for Homebrew formula." >&2
+            exit 1
+          fi
+
+          rm -rf tap
+          git clone "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+
+          cd tap
+          mkdir -p "$(dirname "${FORMULA_PATH}")"
+          cat <<EOF > "${FORMULA_PATH}"
+class Ytunnel < Formula
+  desc "TUI-first CLI for managing Cloudflare Tunnels with custom domains"
+  homepage "https://github.com/${GITHUB_REPOSITORY}"
+  license "MIT"
+  version "${VER}"
+
+  on_macos do
+    on_arm do
+      url "${TAP_URL}/ytunnel-darwin-aarch64.tar.gz"
+      sha256 "${DARWIN_ARM64_SHA}"
+    end
+    on_intel do
+      url "${TAP_URL}/ytunnel-darwin-x86_64.tar.gz"
+      sha256 "${DARWIN_X86_64_SHA}"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "${TAP_URL}/ytunnel-linux-x86_64.tar.gz"
+      sha256 "${LINUX_X86_64_SHA}"
+    end
+    on_arm do
+      url "${TAP_URL}/ytunnel-linux-aarch64.tar.gz"
+      sha256 "${LINUX_AARCH64_SHA}"
+    end
+  end
+
+  def install
+    bin.install "ytunnel"
+  end
+
+  test do
+    assert_match "ytunnel", shell_output("#{bin}/ytunnel --version")
+  end
+end
+EOF
+
+          git config user.name "ytunnel-bot"
+          git config user.email "ytunnel-bot@users.noreply.github.com"
+          git add "${FORMULA_PATH}"
+          if git diff --cached --quiet; then
+            echo "No formula changes to commit."
+            exit 0
+          fi
+          git commit -m "ytunnel ${VER}: update Homebrew formula"
+          git push "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" HEAD:main

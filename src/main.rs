@@ -67,12 +67,22 @@ async fn main() -> Result<()> {
         Some(Commands::Delete { name }) => {
             cmd_delete(name).await?;
         }
+        Some(Commands::Reset { yes }) => {
+            cmd_reset(yes).await?;
+        }
     }
 
     Ok(())
 }
 
 async fn cmd_init() -> Result<()> {
+    // Check if already configured
+    if config::config_path()?.exists() {
+        println!("ytunnel is already configured.");
+        println!("To reconfigure with new credentials, run: ytunnel reset");
+        return Ok(());
+    }
+
     println!("Initializing ytunnel...\n");
 
     // Check if cloudflared is installed
@@ -609,6 +619,110 @@ async fn cmd_delete(name: String) -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Reset ytunnel configuration (allows re-initialization)
+async fn cmd_reset(skip_confirm: bool) -> Result<()> {
+    // Check if ytunnel is even configured
+    if !config::config_path()?.exists() {
+        println!("ytunnel is not configured. Nothing to reset.");
+        return Ok(());
+    }
+
+    // Confirmation prompt unless -y flag
+    if !skip_confirm {
+        println!("This will:");
+        println!("  - Stop all running tunnels");
+        println!("  - Remove all tunnel configurations");
+        println!("  - Delete tunnels from Cloudflare");
+        println!("  - Remove ytunnel configuration");
+        println!();
+        println!("Are you sure? [y/N] ");
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+
+        if input != "y" && input != "yes" {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    println!("Resetting ytunnel...\n");
+
+    // Load config for Cloudflare API access
+    let cfg = config::load_config().ok();
+    let client = cfg.as_ref().map(|c| cloudflare::Client::new(&c.api_token));
+
+    // Load state to get all tunnels
+    let state = TunnelState::load().unwrap_or_default();
+
+    // Stop and clean up all tunnels
+    for tunnel in &state.tunnels {
+        print!("Removing tunnel '{}'... ", tunnel.name);
+
+        // Stop daemon
+        daemon::stop_daemon(&tunnel.name).await.ok();
+
+        // Uninstall daemon
+        daemon::uninstall_daemon(&tunnel.name).await.ok();
+
+        // Delete from Cloudflare
+        if let (Some(cfg), Some(client)) = (&cfg, &client) {
+            client
+                .delete_tunnel(&cfg.account_id, &tunnel.tunnel_id)
+                .await
+                .ok();
+        }
+
+        // Remove credentials file
+        if let Ok(creds_path) = tunnel.credentials_path() {
+            std::fs::remove_file(&creds_path).ok();
+        }
+
+        // Remove config file
+        if let Ok(config_path) = tunnel.config_path() {
+            std::fs::remove_file(&config_path).ok();
+        }
+
+        // Remove log file
+        if let Ok(log_path) = tunnel.log_path() {
+            std::fs::remove_file(&log_path).ok();
+        }
+
+        println!("done");
+    }
+
+    // Remove tunnels.toml
+    if let Ok(tunnels_path) = state::tunnels_path() {
+        std::fs::remove_file(&tunnels_path).ok();
+    }
+
+    // Remove config.toml
+    if let Ok(config_path) = config::config_path() {
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    // Clean up empty directories
+    if let Ok(config_dir) = config::config_dir() {
+        // Remove tunnel-configs directory if empty
+        let tunnel_configs_dir = config_dir.join("tunnel-configs");
+        std::fs::remove_dir(&tunnel_configs_dir).ok();
+
+        // Remove credentials directory if empty
+        let credentials_dir = config_dir.join("credentials");
+        std::fs::remove_dir(&credentials_dir).ok();
+
+        // Remove logs directory if empty
+        let logs_dir = config_dir.join("logs");
+        std::fs::remove_dir(&logs_dir).ok();
+    }
+
+    println!("\n✓ ytunnel has been reset.");
+    println!("Run `ytunnel init` to set up with new credentials.");
 
     Ok(())
 }

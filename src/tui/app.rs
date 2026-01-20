@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -1184,7 +1187,7 @@ pub async fn run_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1208,7 +1211,8 @@ pub async fn run_tui() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -1241,9 +1245,20 @@ async fn run_app(
 
         // Poll for events with timeout for async refresh
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                // Only handle key press events (not release)
-                if key.kind != KeyEventKind::Press {
+            let event = event::read()?;
+
+            // Handle paste events (some remote desktop software sends text as paste)
+            if let Event::Paste(text) = &event {
+                if matches!(app.input_mode, InputMode::AddName | InputMode::AddTarget) {
+                    app.input.push_str(text);
+                }
+                continue;
+            }
+
+            if let Event::Key(key) = event {
+                // Handle key press and repeat events (repeat needed for remote desktop)
+                // Skip release events
+                if key.kind == KeyEventKind::Release {
                     continue;
                 }
 

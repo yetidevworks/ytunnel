@@ -498,9 +498,9 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
     let prompt_text = Paragraph::new(prompt).style(Style::default().fg(Color::Yellow));
     f.render_widget(prompt_text, chunks[0]);
 
+    // Render input with cursor directly (no nested block - causes rendering issues)
     let input_text = Paragraph::new(format!("{}_", input))
-        .style(Style::default().fg(Color::White))
-        .block(Block::default().borders(Borders::ALL));
+        .style(Style::default().fg(Color::White));
     f.render_widget(input_text, chunks[1]);
 }
 

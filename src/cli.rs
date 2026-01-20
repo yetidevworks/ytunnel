@@ -98,6 +98,13 @@ pub enum Commands {
         /// Tunnel name (with or without "ytunnel-" prefix)
         name: String,
     },
+
+    /// Reset ytunnel configuration (allows re-initializing with new credentials)
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -261,6 +261,10 @@ ytunnel list
 
 # Delete a tunnel
 ytunnel delete myapp
+
+# Reset all configuration (start fresh)
+ytunnel reset
+ytunnel reset -y  # Skip confirmation
 ```
 
 ### Ephemeral Tunnels
@@ -402,6 +406,19 @@ systemctl --user disable ytunnel-myapp.service
 rm ~/.config/systemd/user/ytunnel-myapp.service
 systemctl --user daemon-reload
 ```
+
+## Changelog
+
+### v0.2.0
+
+- **Remote desktop support** - Fixed TUI input issues when using remote desktop/screen sharing (supports key repeat events and paste input)
+- **Fixed add tunnel modal** - Input text now renders correctly in the add tunnel dialog
+- **Reset command** - Added `ytunnel reset` to remove all configuration and start fresh
+- **Init protection** - Prevents accidental re-initialization if already configured
+
+### v0.1.0
+
+- Initial release with TUI dashboard, persistent tunnels, ephemeral mode, and live metrics
 
 ## License
 

@@ -251,11 +251,21 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("")
             };
 
+            // Health indicator (show warning for unhealthy running tunnels)
+            let health_span = if entry.status == TunnelStatus::Running
+                && entry.health == HealthStatus::Unhealthy
+            {
+                Span::styled(" ⚠", base_style.fg(Color::Red))
+            } else {
+                Span::raw("")
+            };
+
             let line = Line::from(vec![
                 Span::styled(format!("{} ", status_symbol), base_style.fg(status_color)),
                 Span::styled(format!("{:<12}", entry.tunnel.name), final_name_style),
                 Span::styled(hostname_display, hostname_style),
                 auto_start_span,
+                health_span,
             ]);
 
             ListItem::new(line).style(base_style)
@@ -499,8 +509,7 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
     f.render_widget(prompt_text, chunks[0]);
 
     // Render input with cursor directly (no nested block - causes rendering issues)
-    let input_text = Paragraph::new(format!("{}_", input))
-        .style(Style::default().fg(Color::White));
+    let input_text = Paragraph::new(format!("{}_", input)).style(Style::default().fg(Color::White));
     f.render_widget(input_text, chunks[1]);
 }
 

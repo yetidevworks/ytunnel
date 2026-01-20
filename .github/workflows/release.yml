@@ -184,9 +184,10 @@ jobs:
           fi
 
           rm -rf tap
-          git clone "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
 
           cd tap
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git"
           mkdir -p "$(dirname "${FORMULA_PATH}")"
 
           # Write formula using printf to avoid YAML parsing issues with heredoc
@@ -236,4 +237,4 @@ jobs:
             exit 0
           fi
           git commit -m "ytunnel ${VER}: update Homebrew formula"
-          git push "https://${GH_TOKEN}@github.com/${TAP_REPO}.git" HEAD:main
+          git push origin HEAD:main

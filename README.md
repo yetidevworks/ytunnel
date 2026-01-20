@@ -13,6 +13,7 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
 ## Features
 
 - **TUI Dashboard** - Interactive interface to manage all your tunnels
+- **Live Metrics** - Real-time request counts, error rates, and connection status
 - **Persistent tunnels** - Tunnels run as background daemons (via launchd on macOS)
 - **Automatic DNS management** - Creates and updates CNAME records automatically
 - **Multi-zone support** - Use different domains for different tunnels
@@ -126,14 +127,21 @@ The plist tells launchd to run cloudflared with your config. Logs go to the logs
 Run `ytunnel` with no arguments to open the interactive dashboard:
 
 ```
-┌─ Tunnels (2) ─────────────────┬─ Logs: myapp ─────────────────────┐
-│ ● myapp    myapp.example.com  │ 2024-01-20 10:30:21 INF Connected │
-│ ○ api      api.example.com    │ 2024-01-20 10:30:22 INF Ready     │
-│                               │                                    │
-├───────────────────────────────┴────────────────────────────────────┤
-│ Started myapp                                                      │
-│ [a]dd  [s]tart  [S]top  [d]elete  [r]efresh  [q]uit               │
-└────────────────────────────────────────────────────────────────────┘
+┌─ Tunnels (3) ─────────────────────┬─ Logs: myapp ─────────────────────────────────┐
+│ ● myapp       myapp.example.com   │ 2024-01-20 10:30:15 INF Starting tunnel       │
+│ ● api         api.example.com     │ 2024-01-20 10:30:16 INF Connection registered │
+│ ○ staging     staging.example.com │ 2024-01-20 10:30:17 INF Tunnel connected      │
+│                                   │ 2024-01-20 10:30:18 INF Route propagated      │
+│                                   │ 2024-01-20 10:30:21 INF Request served GET /  │
+│                                   │ 2024-01-20 10:30:22 INF Request served GET /  │
+│                                   ├─ Metrics ─────────────────────────────────────┤
+│                                   │ Requests: 1,247    Errors: 3    Active: 2     │
+│                                   │ HA Connections: 4    Edge: dfw08, den01       │
+│                                   │ Status Codes: 200:1198  304:42  404:3  500:4  │
+├───────────────────────────────────┴───────────────────────────────────────────────┤
+│ Started myapp                                                                     │
+│ [a]dd  [s]tart  [S]top  [R]estart  [d]elete  [r]efresh  [q]uit                   │
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Status indicators:**
@@ -147,6 +155,7 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `a` | Add a new tunnel |
 | `s` | Start selected tunnel |
 | `S` | Stop selected tunnel |
+| `R` | Restart selected tunnel (updates daemon config) |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
 | `r` | Refresh status |
@@ -154,6 +163,21 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `q` | Quit |
 
 Tunnels continue running in the background after you close the TUI.
+
+### Metrics Panel
+
+For running tunnels, the TUI displays live metrics from cloudflared's Prometheus endpoint:
+
+- **Requests** - Total requests handled by the tunnel
+- **Errors** - Number of failed requests
+- **Active** - Currently in-flight concurrent requests
+- **HA Connections** - Number of connections to Cloudflare edge (4 = healthy)
+- **Edge** - Cloudflare edge locations the tunnel is connected to (e.g., `dfw08` = Dallas)
+- **Status Codes** - Breakdown of HTTP response codes
+
+Metrics auto-refresh every 5 seconds. Use `R` to restart a tunnel if metrics aren't showing (regenerates daemon config).
+
+### Ephemeral Tunnels
 
 **Ephemeral tunnels** (created with `ytunnel run`) also appear in the TUI marked as `[ephemeral]`. You can:
 - View them alongside managed tunnels

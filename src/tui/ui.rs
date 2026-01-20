@@ -274,7 +274,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             if is_ephemeral {
                 " [m]anage  [d]elete  [r]efresh  [q]uit".to_string()
             } else {
-                " [a]dd  [s]tart  [S]top  [d]elete  [r]efresh  [q]uit".to_string()
+                " [a]dd  [s]tart  [S]top  [R]estart  [d]elete  [r]efresh  [q]uit".to_string()
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

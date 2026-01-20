@@ -548,6 +548,40 @@ impl App {
         Ok(())
     }
 
+    /// Restart the selected tunnel (stop then start, reinstalls daemon config)
+    pub async fn restart_selected(&mut self) -> Result<()> {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            if entry.kind == TunnelKind::Ephemeral {
+                self.status_message = Some("Cannot restart ephemeral tunnel. Import it first with 'm'.".to_string());
+                return Ok(());
+            }
+
+            let name = entry.tunnel.name.clone();
+            let tunnel = entry.tunnel.clone();
+            self.status_message = Some(format!("Restarting {}...", name));
+
+            // Stop the daemon
+            daemon::stop_daemon(&name).await.ok();
+
+            // Reinstall daemon (regenerates plist with latest config, including metrics)
+            daemon::install_daemon(&tunnel).await?;
+
+            // Start the daemon
+            daemon::start_daemon(&name).await?;
+
+            // Update state
+            let mut state = TunnelState::load()?;
+            if let Some(t) = state.find_mut(&name) {
+                t.enabled = true;
+            }
+            state.save()?;
+
+            self.status_message = Some(format!("Restarted {}", name));
+            self.load_tunnels().await?;
+        }
+        Ok(())
+    }
+
     /// Check if selected tunnel is ephemeral
     pub fn is_selected_ephemeral(&self) -> bool {
         self.tunnels
@@ -888,6 +922,11 @@ async fn run_app(
                                 app.status_message = Some(format!("Error: {}", e));
                             } else {
                                 app.status_message = Some("Refreshed".to_string());
+                            }
+                        }
+                        KeyCode::Char('R') => {
+                            if let Err(e) = app.restart_selected().await {
+                                app.status_message = Some(format!("Error: {}", e));
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {

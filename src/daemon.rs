@@ -434,6 +434,7 @@ pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Public API for consistency with macOS
 pub async fn is_daemon_running(tunnel_name: &str) -> bool {
     let svc = service_name(tunnel_name);
 

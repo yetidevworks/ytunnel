@@ -70,6 +70,7 @@ pub enum InputMode {
     AddTarget,
     AddZone,
     Confirm,
+    Help,
 }
 
 /// Whether a tunnel is managed (persistent) or ephemeral
@@ -436,6 +437,7 @@ impl App {
         if let Some(entry) = self.tunnels.get_mut(self.selected) {
             if entry.status != TunnelStatus::Running {
                 entry.health = HealthStatus::Unknown;
+                self.status_message = Some("Tunnel not running".to_string());
                 return;
             }
 
@@ -444,6 +446,7 @@ impl App {
             let hostname = entry.tunnel.hostname.clone();
 
             entry.health = HealthStatus::Checking;
+            self.status_message = Some(format!("Checking health of {}...", tunnel_name));
 
             let url = format!("https://{}", hostname);
 
@@ -493,6 +496,18 @@ impl App {
                     &format!("Tunnel Up: {}", tunnel_name),
                     "The tunnel is now reachable",
                 );
+            }
+            (HealthStatus::Checking, HealthStatus::Healthy) => {
+                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
+            }
+            (HealthStatus::Checking, HealthStatus::Unhealthy) => {
+                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
+            }
+            (HealthStatus::Unknown, HealthStatus::Healthy) => {
+                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
+            }
+            (HealthStatus::Unknown, HealthStatus::Unhealthy) => {
+                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
             }
             _ => {}
         }
@@ -804,6 +819,7 @@ impl App {
     pub fn copy_url_to_clipboard(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             let url = format!("https://{}", entry.tunnel.hostname);
+            self.status_message = Some(format!("Copying {}...", url));
 
             // Use pbcopy on macOS
             use std::process::{Command, Stdio};
@@ -827,6 +843,8 @@ impl App {
                     self.status_message = Some("Failed to copy to clipboard".to_string());
                 }
             }
+        } else {
+            self.status_message = Some("No tunnel selected".to_string());
         }
     }
 
@@ -834,6 +852,7 @@ impl App {
     pub fn open_in_browser(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             let url = format!("https://{}", entry.tunnel.hostname);
+            self.status_message = Some(format!("Opening {}...", url));
 
             // Use open command on macOS
             use std::process::Command;
@@ -848,6 +867,8 @@ impl App {
                     self.status_message = Some("Failed to open browser".to_string());
                 }
             }
+        } else {
+            self.status_message = Some("No tunnel selected".to_string());
         }
     }
 
@@ -1207,11 +1228,20 @@ async fn run_app(
                         KeyCode::Char('h') => {
                             app.check_health().await;
                         }
+                        KeyCode::Char('?') => {
+                            app.input_mode = InputMode::Help;
+                        }
                         KeyCode::Up | KeyCode::Char('k') => {
                             app.select_previous();
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             app.select_next();
+                        }
+                        _ => {}
+                    },
+                    InputMode::Help => match key.code {
+                        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
+                            app.input_mode = InputMode::Normal;
                         }
                         _ => {}
                     },

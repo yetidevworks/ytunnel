@@ -63,8 +63,107 @@ pub fn render(f: &mut Frame, app: &App) {
                 render_confirm_dialog(f, msg);
             }
         }
+        InputMode::Help => render_help_modal(f),
         InputMode::Normal => {}
     }
+}
+
+fn render_help_modal(f: &mut Frame) {
+    let area = centered_rect(70, 80, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Help - Press Esc to close ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let help_text = vec![
+        Line::from(Span::styled("NAVIGATION", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ↑/k      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move selection up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ↓/j      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move selection down"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Quit ytunnel"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("TUNNEL MANAGEMENT", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  a        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Add a new tunnel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  s        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Start selected tunnel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  S        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Stop selected tunnel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Restart tunnel (updates daemon config)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Delete selected tunnel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  m        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Import ephemeral tunnel as managed"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("QUICK ACTIONS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  c        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Copy tunnel URL to clipboard"),
+        ]),
+        Line::from(vec![
+            Span::styled("  o        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Open tunnel URL in browser"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Check tunnel health now"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Refresh tunnel list and status"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("METRICS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Metrics auto-refresh every "),
+            Span::styled("5 seconds", Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Health checks run every "),
+            Span::styled("30 seconds", Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::raw("  System notifications on tunnel "),
+            Span::styled("down/up", Style::default().fg(Color::Red)),
+        ]),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(help, inner);
 }
 
 fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
@@ -292,9 +391,9 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(false);
 
             if is_ephemeral {
-                " [m]anage  [c]opy  [o]pen  [h]ealth  [d]elete  [r]efresh  [q]uit".to_string()
+                " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
             } else {
-                " [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [q]uit".to_string()
+                " [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
             }
         }
         InputMode::AddName | InputMode::AddTarget => {
@@ -305,6 +404,9 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         InputMode::Confirm => {
             " y confirm  n/Esc cancel".to_string()
+        }
+        InputMode::Help => {
+            " Press Esc or ? to close help".to_string()
         }
     };
 

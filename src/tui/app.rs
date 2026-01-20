@@ -81,6 +81,82 @@ pub enum TunnelKind {
     Ephemeral,
 }
 
+/// Health check status for a tunnel
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HealthStatus {
+    #[default]
+    Unknown,
+    Healthy,
+    Unhealthy,
+    Checking,
+}
+
+impl HealthStatus {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            HealthStatus::Unknown => "?",
+            HealthStatus::Healthy => "✓",
+            HealthStatus::Unhealthy => "✗",
+            HealthStatus::Checking => "…",
+        }
+    }
+}
+
+/// Historical metrics for sparkline display
+#[derive(Debug, Clone, Default)]
+pub struct MetricsHistory {
+    /// Request counts over time (last 30 samples)
+    pub request_samples: Vec<u64>,
+    /// Last known total requests (to calculate delta)
+    pub last_total: u64,
+}
+
+impl MetricsHistory {
+    const MAX_SAMPLES: usize = 30;
+
+    /// Record a new sample
+    pub fn record(&mut self, total_requests: u64) {
+        // Calculate delta since last sample
+        let delta = if total_requests >= self.last_total {
+            total_requests - self.last_total
+        } else {
+            // Counter reset, just use total
+            total_requests
+        };
+
+        self.request_samples.push(delta);
+
+        // Keep only last N samples
+        if self.request_samples.len() > Self::MAX_SAMPLES {
+            self.request_samples.remove(0);
+        }
+
+        self.last_total = total_requests;
+    }
+
+    /// Generate sparkline string using Unicode blocks
+    pub fn sparkline(&self) -> String {
+        if self.request_samples.is_empty() {
+            return String::new();
+        }
+
+        let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let max = *self.request_samples.iter().max().unwrap_or(&1).max(&1);
+
+        self.request_samples
+            .iter()
+            .map(|&val| {
+                let idx = if max > 0 {
+                    ((val as f64 / max as f64) * 7.0).round() as usize
+                } else {
+                    0
+                };
+                blocks[idx.min(7)]
+            })
+            .collect()
+    }
+}
+
 /// A tunnel entry with its runtime status
 #[derive(Debug, Clone)]
 pub struct TunnelEntry {
@@ -88,6 +164,8 @@ pub struct TunnelEntry {
     pub status: TunnelStatus,
     pub kind: TunnelKind,
     pub metrics: Option<TunnelMetrics>,
+    pub metrics_history: MetricsHistory,
+    pub health: HealthStatus,
 }
 
 /// Application state
@@ -172,17 +250,36 @@ impl App {
         for tunnel in state.tunnels {
             let status = daemon::get_daemon_status(&tunnel).await;
             // Fetch metrics for running tunnels
-            let metrics = if status == TunnelStatus::Running {
+            let (metrics, mut history) = if status == TunnelStatus::Running {
                 let m = TunnelMetrics::fetch(&tunnel.metrics_url()).await;
-                if m.available { Some(m) } else { None }
+                if m.available {
+                    let mut h = MetricsHistory::default();
+                    h.record(m.total_requests);
+                    (Some(m), h)
+                } else {
+                    (None, MetricsHistory::default())
+                }
             } else {
-                None
+                (None, MetricsHistory::default())
             };
+
+            // Preserve existing history and health if we have it
+            let mut health = HealthStatus::Unknown;
+            if let Some(existing) = self.tunnels.iter().find(|e| e.tunnel.name == tunnel.name) {
+                history = existing.metrics_history.clone();
+                health = existing.health;
+                if let Some(ref m) = metrics {
+                    history.record(m.total_requests);
+                }
+            }
+
             entries.push(TunnelEntry {
                 tunnel,
                 status,
                 kind: TunnelKind::Managed,
                 metrics,
+                metrics_history: history,
+                health,
             });
         }
 
@@ -255,6 +352,8 @@ impl App {
                         status,
                         kind: TunnelKind::Ephemeral,
                         metrics: None,
+                        metrics_history: MetricsHistory::default(),
+                        health: HealthStatus::Unknown,
                     });
                 }
             }
@@ -322,14 +421,125 @@ impl App {
         if let Some(entry) = self.tunnels.get_mut(self.selected) {
             if entry.kind == TunnelKind::Managed && entry.status == TunnelStatus::Running {
                 let metrics = TunnelMetrics::fetch(&entry.tunnel.metrics_url()).await;
-                entry.metrics = if metrics.available { Some(metrics) } else { None };
+                if metrics.available {
+                    entry.metrics_history.record(metrics.total_requests);
+                    entry.metrics = Some(metrics);
+                } else {
+                    entry.metrics = None;
+                }
             }
         }
+    }
+
+    /// Check health of the selected tunnel by making an HTTP request
+    pub async fn check_health(&mut self) {
+        if let Some(entry) = self.tunnels.get_mut(self.selected) {
+            if entry.status != TunnelStatus::Running {
+                entry.health = HealthStatus::Unknown;
+                return;
+            }
+
+            let previous_health = entry.health;
+            let tunnel_name = entry.tunnel.name.clone();
+            let hostname = entry.tunnel.hostname.clone();
+
+            entry.health = HealthStatus::Checking;
+
+            let url = format!("https://{}", hostname);
+
+            // Simple HTTP HEAD request with short timeout
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .danger_accept_invalid_certs(true) // In case of self-signed certs
+                .build();
+
+            let result = match client {
+                Ok(c) => c.head(&url).send().await,
+                Err(_) => {
+                    entry.health = HealthStatus::Unhealthy;
+                    self.notify_health_change(&tunnel_name, previous_health, HealthStatus::Unhealthy);
+                    return;
+                }
+            };
+
+            let new_health = match result {
+                Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
+                    HealthStatus::Healthy
+                }
+                Ok(resp) if resp.status().is_server_error() => HealthStatus::Unhealthy,
+                Ok(_) => HealthStatus::Healthy, // 4xx is still "reachable"
+                Err(_) => HealthStatus::Unhealthy,
+            };
+
+            entry.health = new_health;
+            self.notify_health_change(&tunnel_name, previous_health, new_health);
+        }
+    }
+
+    /// Send notification when tunnel health changes
+    fn notify_health_change(&mut self, tunnel_name: &str, old: HealthStatus, new: HealthStatus) {
+        // Only notify on meaningful transitions
+        match (old, new) {
+            (HealthStatus::Healthy, HealthStatus::Unhealthy) => {
+                self.status_message = Some(format!("⚠️  Tunnel '{}' is DOWN!", tunnel_name));
+                self.send_system_notification(
+                    &format!("Tunnel Down: {}", tunnel_name),
+                    "The tunnel is no longer reachable",
+                );
+            }
+            (HealthStatus::Unhealthy, HealthStatus::Healthy) => {
+                self.status_message = Some(format!("✓ Tunnel '{}' is back UP", tunnel_name));
+                self.send_system_notification(
+                    &format!("Tunnel Up: {}", tunnel_name),
+                    "The tunnel is now reachable",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Send a system notification (macOS)
+    fn send_system_notification(&self, title: &str, message: &str) {
+        use std::process::Command;
+
+        // Try terminal-notifier first, fall back to osascript
+        let result = Command::new("terminal-notifier")
+            .args(["-title", title, "-message", message, "-sound", "default"])
+            .spawn();
+
+        if result.is_err() {
+            // Fall back to osascript
+            let script = format!(
+                r#"display notification "{}" with title "{}""#,
+                message.replace('"', r#"\""#),
+                title.replace('"', r#"\""#)
+            );
+            Command::new("osascript")
+                .args(["-e", &script])
+                .spawn()
+                .ok();
+        }
+    }
+
+    /// Get health status for the selected tunnel
+    pub fn selected_health(&self) -> HealthStatus {
+        self.tunnels
+            .get(self.selected)
+            .map(|e| e.health)
+            .unwrap_or(HealthStatus::Unknown)
     }
 
     /// Get metrics for the selected tunnel
     pub fn selected_metrics(&self) -> Option<&TunnelMetrics> {
         self.tunnels.get(self.selected).and_then(|e| e.metrics.as_ref())
+    }
+
+    /// Get sparkline for the selected tunnel
+    pub fn selected_sparkline(&self) -> String {
+        self.tunnels
+            .get(self.selected)
+            .map(|e| e.metrics_history.sparkline())
+            .unwrap_or_default()
     }
 
     /// Move selection up
@@ -588,6 +798,57 @@ impl App {
             .get(self.selected)
             .map(|e| e.kind == TunnelKind::Ephemeral)
             .unwrap_or(false)
+    }
+
+    /// Copy the selected tunnel's URL to clipboard
+    pub fn copy_url_to_clipboard(&mut self) {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            let url = format!("https://{}", entry.tunnel.hostname);
+
+            // Use pbcopy on macOS
+            use std::process::{Command, Stdio};
+            use std::io::Write;
+
+            let result = Command::new("pbcopy")
+                .stdin(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(url.as_bytes())?;
+                    }
+                    child.wait()
+                });
+
+            match result {
+                Ok(status) if status.success() => {
+                    self.status_message = Some(format!("Copied: {}", url));
+                }
+                _ => {
+                    self.status_message = Some("Failed to copy to clipboard".to_string());
+                }
+            }
+        }
+    }
+
+    /// Open the selected tunnel's URL in browser
+    pub fn open_in_browser(&mut self) {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            let url = format!("https://{}", entry.tunnel.hostname);
+
+            // Use open command on macOS
+            use std::process::Command;
+
+            let result = Command::new("open").arg(&url).spawn();
+
+            match result {
+                Ok(_) => {
+                    self.status_message = Some(format!("Opened: {}", url));
+                }
+                Err(_) => {
+                    self.status_message = Some("Failed to open browser".to_string());
+                }
+            }
+        }
     }
 
     /// Start import flow for ephemeral tunnel
@@ -872,7 +1133,9 @@ async fn run_app(
     app: &mut App,
 ) -> Result<()> {
     let mut last_metrics_refresh = std::time::Instant::now();
+    let mut last_health_check = std::time::Instant::now();
     let metrics_refresh_interval = Duration::from_secs(5);
+    let health_check_interval = Duration::from_secs(30);
 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -881,6 +1144,12 @@ async fn run_app(
         if last_metrics_refresh.elapsed() >= metrics_refresh_interval {
             app.refresh_metrics().await;
             last_metrics_refresh = std::time::Instant::now();
+        }
+
+        // Check health less frequently
+        if last_health_check.elapsed() >= health_check_interval {
+            app.check_health().await;
+            last_health_check = std::time::Instant::now();
         }
 
         // Poll for events with timeout for async refresh
@@ -928,6 +1197,15 @@ async fn run_app(
                             if let Err(e) = app.restart_selected().await {
                                 app.status_message = Some(format!("Error: {}", e));
                             }
+                        }
+                        KeyCode::Char('c') => {
+                            app.copy_url_to_clipboard();
+                        }
+                        KeyCode::Char('o') => {
+                            app.open_in_browser();
+                        }
+                        KeyCode::Char('h') => {
+                            app.check_health().await;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             app.select_previous();

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, InputMode, TunnelKind};
+use super::app::{App, HealthStatus, InputMode, TunnelKind};
 use crate::metrics::TunnelMetrics;
 use crate::state::TunnelStatus;
 
@@ -34,14 +34,14 @@ pub fn render(f: &mut Frame, app: &App) {
     if has_metrics {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(7)])
+            .constraints([Constraint::Min(0), Constraint::Length(8)])
             .split(content_chunks[1]);
 
         // Render logs panel
         render_logs(f, app, right_chunks[0]);
 
         // Render metrics panel
-        render_metrics(f, app.selected_metrics(), right_chunks[1]);
+        render_metrics(f, app.selected_metrics(), &app.selected_sparkline(), app.selected_health(), right_chunks[1]);
     } else {
         // Just render logs panel
         render_logs(f, app, content_chunks[1]);
@@ -181,7 +181,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(logs, area);
 }
 
-fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, area: Rect) {
+fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, sparkline: &str, health: HealthStatus, area: Rect) {
     let metrics = match metrics {
         Some(m) => m,
         None => return,
@@ -195,6 +195,14 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, area: Rect) {
         .map(|(code, count)| format!("{}:{}", code, count))
         .collect::<Vec<_>>()
         .join("  ");
+
+    // Health status formatting
+    let (health_symbol, health_color, health_text) = match health {
+        HealthStatus::Unknown => ("?", Color::Gray, "unknown"),
+        HealthStatus::Healthy => ("✓", Color::Green, "healthy"),
+        HealthStatus::Unhealthy => ("✗", Color::Red, "unreachable"),
+        HealthStatus::Checking => ("…", Color::Yellow, "checking"),
+    };
 
     let lines = vec![
         Line::from(vec![
@@ -212,6 +220,11 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, area: Rect) {
             Span::styled(
                 format!("{}", metrics.concurrent_requests),
                 Style::default().fg(Color::Cyan),
+            ),
+            Span::styled("    Health: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} {}", health_symbol, health_text),
+                Style::default().fg(health_color),
             ),
         ]),
         Line::from(vec![
@@ -231,6 +244,13 @@ fn render_metrics(f: &mut Frame, metrics: Option<&TunnelMetrics>, area: Rect) {
             Span::styled(
                 if codes_str.is_empty() { "none".to_string() } else { codes_str },
                 Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Traffic: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if sparkline.is_empty() { "waiting...".to_string() } else { sparkline.to_string() },
+                Style::default().fg(Color::Green),
             ),
         ]),
     ];
@@ -272,9 +292,9 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(false);
 
             if is_ephemeral {
-                " [m]anage  [d]elete  [r]efresh  [q]uit".to_string()
+                " [m]anage  [c]opy  [o]pen  [h]ealth  [d]elete  [r]efresh  [q]uit".to_string()
             } else {
-                " [a]dd  [s]tart  [S]top  [R]estart  [d]elete  [r]efresh  [q]uit".to_string()
+                " [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [q]uit".to_string()
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

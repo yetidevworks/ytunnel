@@ -133,14 +133,15 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 │ ○ staging     staging.example.com │ 2024-01-20 10:30:17 INF Tunnel connected      │
 │                                   │ 2024-01-20 10:30:18 INF Route propagated      │
 │                                   │ 2024-01-20 10:30:21 INF Request served GET /  │
-│                                   │ 2024-01-20 10:30:22 INF Request served GET /  │
 │                                   ├─ Metrics ─────────────────────────────────────┤
-│                                   │ Requests: 1,247    Errors: 3    Active: 2     │
+│                                   │ Requests: 1,247  Errors: 3  Active: 2         │
+│                                   │ Health: ✓ healthy                             │
 │                                   │ HA Connections: 4    Edge: dfw08, den01       │
 │                                   │ Status Codes: 200:1198  304:42  404:3  500:4  │
+│                                   │ Traffic: ▁▂▃▅▆▄▃▂▁▂▃▄▅▆▇█▆▅▄▃▂▁▂▃▄▅▆▇        │
 ├───────────────────────────────────┴───────────────────────────────────────────────┤
 │ Started myapp                                                                     │
-│ [a]dd  [s]tart  [S]top  [R]estart  [d]elete  [r]efresh  [q]uit                   │
+│ [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [q]uit  │
 └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -155,7 +156,10 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `a` | Add a new tunnel |
 | `s` | Start selected tunnel |
 | `S` | Stop selected tunnel |
-| `R` | Restart selected tunnel (updates daemon config) |
+| `R` | Restart tunnel (updates daemon config) |
+| `c` | Copy tunnel URL to clipboard |
+| `o` | Open tunnel URL in browser |
+| `h` | Check tunnel health |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
 | `r` | Refresh status |
@@ -169,13 +173,19 @@ Tunnels continue running in the background after you close the TUI.
 For running tunnels, the TUI displays live metrics from cloudflared's Prometheus endpoint:
 
 - **Requests** - Total requests handled by the tunnel
-- **Errors** - Number of failed requests
+- **Errors** - Number of failed requests (red if > 0)
 - **Active** - Currently in-flight concurrent requests
+- **Health** - Whether the tunnel URL is reachable (✓ healthy / ✗ unreachable)
 - **HA Connections** - Number of connections to Cloudflare edge (4 = healthy)
-- **Edge** - Cloudflare edge locations the tunnel is connected to (e.g., `dfw08` = Dallas)
+- **Edge** - Cloudflare edge locations (e.g., `dfw08` = Dallas)
 - **Status Codes** - Breakdown of HTTP response codes
+- **Traffic** - Sparkline showing request rate over time
 
-Metrics auto-refresh every 5 seconds. Use `R` to restart a tunnel if metrics aren't showing (regenerates daemon config).
+Metrics auto-refresh every 5 seconds. Health checks run every 30 seconds. Use `h` for immediate health check.
+
+### Notifications
+
+When a tunnel goes down or comes back up, ytunnel sends a system notification (on macOS via `terminal-notifier` or `osascript`). This helps you catch issues even when the TUI isn't visible.
 
 ### Ephemeral Tunnels
 
@@ -198,9 +208,15 @@ ytunnel add myapp localhost:3000 --start
 # Use a specific zone
 ytunnel add api localhost:8080 -z dev.example.com
 
-# Start/stop tunnels
+# Start/stop/restart tunnels
 ytunnel start myapp
 ytunnel stop myapp
+ytunnel restart myapp    # Stop, update config, start
+
+# View logs
+ytunnel logs myapp           # Last 50 lines
+ytunnel logs myapp -n 100    # Last 100 lines
+ytunnel logs myapp -f        # Follow (like tail -f)
 
 # List all tunnels with status
 ytunnel list

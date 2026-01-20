@@ -42,6 +42,12 @@ async fn main() -> Result<()> {
         Some(Commands::Stop { name }) => {
             cmd_stop(name).await?;
         }
+        Some(Commands::Restart { name }) => {
+            cmd_restart(name).await?;
+        }
+        Some(Commands::Logs { name, follow, lines }) => {
+            cmd_logs(name, follow, lines).await?;
+        }
         Some(Commands::Zones { command }) => match command {
             None => cmd_zones_list().await?,
             Some(ZonesCommands::Default { domain }) => cmd_zones_default(domain).await?,
@@ -377,6 +383,76 @@ async fn cmd_stop(name: String) -> Result<()> {
 
     println!("✓ Stopped tunnel: {}", name);
     println!("  {}", hostname);
+
+    Ok(())
+}
+
+/// Restart a running tunnel (stop, reinstall daemon config, start)
+async fn cmd_restart(name: String) -> Result<()> {
+    let state = TunnelState::load()?;
+
+    let tunnel = state.find(&name).ok_or_else(|| {
+        anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+    })?.clone();
+
+    println!("Restarting tunnel: {}", name);
+
+    // Stop the daemon
+    daemon::stop_daemon(&name).await.ok();
+
+    // Reinstall daemon (regenerates plist with latest config)
+    write_tunnel_config(&tunnel)?;
+    daemon::install_daemon(&tunnel).await?;
+
+    // Start the daemon
+    daemon::start_daemon(&name).await?;
+
+    // Update state
+    let mut state = TunnelState::load()?;
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = true;
+    }
+    state.save()?;
+
+    println!("✓ Restarted tunnel: {}", name);
+    println!("  https://{}", tunnel.hostname);
+
+    Ok(())
+}
+
+/// View logs for a tunnel
+async fn cmd_logs(name: String, follow: bool, lines: usize) -> Result<()> {
+    let state = TunnelState::load()?;
+
+    let tunnel = state.find(&name).ok_or_else(|| {
+        anyhow::anyhow!("Tunnel '{}' not found. Run `ytunnel list` to see available tunnels.", name)
+    })?;
+
+    let log_path = tunnel.log_path()?;
+
+    if !log_path.exists() {
+        println!("No logs yet for tunnel '{}'", name);
+        return Ok(());
+    }
+
+    if follow {
+        // Use tail -f for following
+        use std::process::Command;
+        let status = Command::new("tail")
+            .args(["-f", "-n", &lines.to_string()])
+            .arg(&log_path)
+            .status()?;
+
+        if !status.success() {
+            anyhow::bail!("Failed to tail log file");
+        }
+    } else {
+        // Just read and print the last N lines
+        let log_lines = daemon::read_log_tail(tunnel, lines)?;
+        for line in log_lines {
+            println!("{}", line);
+        }
+    }
 
     Ok(())
 }

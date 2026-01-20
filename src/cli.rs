@@ -64,6 +64,26 @@ pub enum Commands {
         name: String,
     },
 
+    /// Restart a tunnel (stop, update config, start)
+    Restart {
+        /// Tunnel name
+        name: String,
+    },
+
+    /// View logs for a tunnel
+    Logs {
+        /// Tunnel name
+        name: String,
+
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Number of lines to show (default: 50)
+        #[arg(short, long, default_value = "50")]
+        lines: usize,
+    },
+
     /// Manage zones/domains
     Zones {
         #[command(subcommand)]

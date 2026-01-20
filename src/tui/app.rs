@@ -460,7 +460,7 @@ impl App {
                 Ok(c) => c.head(&url).send().await,
                 Err(_) => {
                     entry.health = HealthStatus::Unhealthy;
-                    self.notify_health_change(&tunnel_name, previous_health, HealthStatus::Unhealthy);
+                    self.show_health_result(&tunnel_name, previous_health, HealthStatus::Unhealthy);
                     return;
                 }
             };
@@ -475,13 +475,24 @@ impl App {
             };
 
             entry.health = new_health;
-            self.notify_health_change(&tunnel_name, previous_health, new_health);
+            self.show_health_result(&tunnel_name, previous_health, new_health);
         }
     }
 
-    /// Send notification when tunnel health changes
-    fn notify_health_change(&mut self, tunnel_name: &str, old: HealthStatus, new: HealthStatus) {
-        // Only notify on meaningful transitions
+    /// Show health check result and send notifications for state changes
+    fn show_health_result(&mut self, tunnel_name: &str, old: HealthStatus, new: HealthStatus) {
+        // Always show the result in status bar
+        match new {
+            HealthStatus::Healthy => {
+                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
+            }
+            HealthStatus::Unhealthy => {
+                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
+            }
+            _ => {}
+        }
+
+        // Send system notification only on meaningful transitions
         match (old, new) {
             (HealthStatus::Healthy, HealthStatus::Unhealthy) => {
                 self.status_message = Some(format!("⚠️  Tunnel '{}' is DOWN!", tunnel_name));
@@ -496,18 +507,6 @@ impl App {
                     &format!("Tunnel Up: {}", tunnel_name),
                     "The tunnel is now reachable",
                 );
-            }
-            (HealthStatus::Checking, HealthStatus::Healthy) => {
-                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
-            }
-            (HealthStatus::Checking, HealthStatus::Unhealthy) => {
-                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
-            }
-            (HealthStatus::Unknown, HealthStatus::Healthy) => {
-                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
-            }
-            (HealthStatus::Unknown, HealthStatus::Unhealthy) => {
-                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
             }
             _ => {}
         }

@@ -5,6 +5,7 @@
  |   |   |_     _|.--.--.-----.-----.-----.|  |
   \     /  |   |  |  |  |     |     |  -__||  |
    |___|   |___|  |_____|__|__|__|__|_____||__|
+   Cloudflare tunnels made easy!
 
 ```
 
@@ -138,10 +139,10 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 │                                   │ Health: ✓ healthy                             │
 │                                   │ HA Connections: 4    Edge: dfw08, den01       │
 │                                   │ Status Codes: 200:1198  304:42  404:3  500:4  │
-│                                   │ Traffic: ▁▂▃▅▆▄▃▂▁▂▃▄▅▆▇█▆▅▄▃▂▁▂▃▄▅▆▇        │
+│                                   │ Traffic: ▁▂▃▅▆▄▃▂▁▂▃▄▅▆▇█▆▅▄▃▂▁▂▃▄▅▆▇         │
 ├───────────────────────────────────┴───────────────────────────────────────────────┤
 │ Started myapp                                                                     │
-│ [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [q]uit  │
+│ [a]dd [s]tart [S]top [R]estart [c]opy [o]pen [h]ealth [d]elete [r]efresh [q]uit   │
 └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 

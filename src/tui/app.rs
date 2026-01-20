@@ -557,19 +557,31 @@ impl App {
     }
 
     /// Move selection up
-    pub fn select_previous(&mut self) {
+    pub fn select_previous(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected > 0 {
             self.selected -= 1;
             self.refresh_logs();
+            return true; // Selection changed
         }
+        false
     }
 
     /// Move selection down
-    pub fn select_next(&mut self) {
+    pub fn select_next(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
             self.selected += 1;
             self.refresh_logs();
+            return true; // Selection changed
         }
+        false
+    }
+
+    /// Check if selected tunnel needs a health check (unknown or stale)
+    pub fn selected_needs_health_check(&self) -> bool {
+        self.tunnels
+            .get(self.selected)
+            .map(|e| e.status == TunnelStatus::Running && e.health == HealthStatus::Unknown)
+            .unwrap_or(false)
     }
 
     /// Start the add tunnel flow
@@ -1133,6 +1145,11 @@ pub async fn run_tui() -> Result<()> {
         app.status_message = Some(format!("Error loading tunnels: {}", e));
     }
 
+    // Initial health check for selected tunnel
+    if app.selected_needs_health_check() {
+        app.check_health().await;
+    }
+
     // Main loop
     let result = run_app(&mut terminal, &mut app).await;
 
@@ -1211,6 +1228,10 @@ async fn run_app(
                                 app.status_message = Some(format!("Error: {}", e));
                             } else {
                                 app.status_message = Some("Refreshed".to_string());
+                                // Check health of selected tunnel after refresh
+                                if app.selected_needs_health_check() {
+                                    app.check_health().await;
+                                }
                             }
                         }
                         KeyCode::Char('R') => {
@@ -1231,10 +1252,14 @@ async fn run_app(
                             app.input_mode = InputMode::Help;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            app.select_previous();
+                            if app.select_previous() && app.selected_needs_health_check() {
+                                app.check_health().await;
+                            }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            app.select_next();
+                            if app.select_next() && app.selected_needs_health_check() {
+                                app.check_health().await;
+                            }
                         }
                         _ => {}
                     },

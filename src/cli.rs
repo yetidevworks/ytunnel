@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[command(about = "Simple Cloudflare Tunnel CLI for custom domains", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// Use a specific account (overrides the default selected account)
+    // Use a specific account (overrides the default selected account)
     #[arg(long, global = true)]
     pub account: Option<String>,
 
@@ -110,7 +110,7 @@ pub enum Commands {
         yes: bool,
     },
 
-    /// Manage Cloudflare accounts
+    // Manage Cloudflare accounts
     Account {
         #[command(subcommand)]
         command: Option<AccountCommands>,
@@ -119,27 +119,27 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum AccountCommands {
-    /// List all configured accounts
+    // List all configured accounts
     List,
 
-    /// Set the default account
+    // Set the default account
     Select {
-        /// Account name to select as default
+        // Account name to select as default
         name: String,
     },
 
-    /// Alias for select - set the default account
+    // Alias for select - set the default account
     Default {
-        /// Account name to select as default
+        // Account name to select as default
         name: String,
     },
 
-    /// Remove an account
+    // Remove an account
     Remove {
-        /// Account name to remove
+        // Account name to remove
         name: String,
 
-        /// Skip confirmation prompt
+        // Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
     },

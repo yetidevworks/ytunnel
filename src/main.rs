@@ -146,9 +146,7 @@ async fn cmd_init() -> Result<()> {
             }
             "r" => {
                 // Confirm and reinitialize
-                println!(
-                    "This will remove all accounts and tunnels. Are you sure? [y/N]"
-                );
+                println!("This will remove all accounts and tunnels. Are you sure? [y/N]");
                 print!("> ");
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut confirm = String::new();
@@ -201,7 +199,9 @@ async fn cmd_init() -> Result<()> {
 
     // Get API token
     println!("\nEnter your Cloudflare API token:");
-    println!("  Required permissions: Zone→Zone→Edit, Zone→DNS→Edit, Account→Cloudflare Tunnel→Edit");
+    println!(
+        "  Required permissions: Zone→Zone→Edit, Zone→DNS→Edit, Account→Cloudflare Tunnel→Edit"
+    );
     print!("> ");
     std::io::Write::flush(&mut std::io::stdout())?;
     let mut token = String::new();
@@ -267,10 +267,7 @@ async fn cmd_init() -> Result<()> {
 
     // Ask if this should be the default (if there are multiple accounts)
     if cfg.accounts.len() > 1 && cfg.selected_account != account_name {
-        println!(
-            "\nSet '{}' as the default account? [y/N]",
-            account_name
-        );
+        println!("\nSet '{}' as the default account? [y/N]", account_name);
         print!("> ");
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut set_default = String::new();
@@ -665,13 +662,15 @@ async fn cmd_logs(name: String, follow: bool, lines: usize, account: Option<&str
     let account_name = cfg.get_account(account)?.name.clone();
     let state = TunnelState::load()?;
 
-    let tunnel = state.find_for_account(&name, &account_name).ok_or_else(|| {
-        anyhow::anyhow!(
+    let tunnel = state
+        .find_for_account(&name, &account_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
             "Tunnel '{}' not found for account '{}'. Run `ytunnel list` to see available tunnels.",
             name,
             account_name
         )
-    })?;
+        })?;
 
     let log_path = tunnel.log_path()?;
 
@@ -836,7 +835,10 @@ async fn cmd_delete(name: String, account: Option<&str>) -> Result<()> {
                 println!("✓ Deleted Cloudflare tunnel: {}", tunnel_name);
             }
             None => {
-                println!("Tunnel '{}' not found for account '{}'.", name, account_name);
+                println!(
+                    "Tunnel '{}' not found for account '{}'.",
+                    name, account_name
+                );
             }
         }
     }
@@ -895,7 +897,9 @@ async fn cmd_reset(skip_confirm: bool) -> Result<()> {
         daemon::stop_daemon(&tunnel.name, &acct_name).await.ok();
 
         // Uninstall daemon
-        daemon::uninstall_daemon(&tunnel.name, &acct_name).await.ok();
+        daemon::uninstall_daemon(&tunnel.name, &acct_name)
+            .await
+            .ok();
 
         // Delete from Cloudflare - find the right account
         if let Some(cfg) = &cfg {

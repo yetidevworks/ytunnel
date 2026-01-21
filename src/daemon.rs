@@ -44,7 +44,10 @@ fn legacy_launchd_label(tunnel_name: &str) -> String {
 #[cfg(target_os = "macos")]
 fn plist_path(account_name: &str, tunnel_name: &str) -> Result<PathBuf> {
     let agents_dir = launch_agents_dir()?;
-    Ok(agents_dir.join(format!("{}.plist", launchd_label(account_name, tunnel_name))))
+    Ok(agents_dir.join(format!(
+        "{}.plist",
+        launchd_label(account_name, tunnel_name)
+    )))
 }
 
 #[cfg(target_os = "macos")]
@@ -53,7 +56,7 @@ fn legacy_plist_path(tunnel_name: &str) -> Result<PathBuf> {
     Ok(agents_dir.join(format!("{}.plist", legacy_launchd_label(tunnel_name))))
 }
 
-/// Find the actual plist path - checks new naming first, then legacy
+// Find the actual plist path - checks new naming first, then legacy
 #[cfg(target_os = "macos")]
 fn find_plist_path(account_name: &str, tunnel_name: &str) -> Result<Option<PathBuf>> {
     // First check the new naming convention
@@ -71,7 +74,7 @@ fn find_plist_path(account_name: &str, tunnel_name: &str) -> Result<Option<PathB
     Ok(None)
 }
 
-/// Find the actual launchd label for a tunnel - checks new naming first, then legacy
+// Find the actual launchd label for a tunnel - checks new naming first, then legacy
 #[cfg(target_os = "macos")]
 async fn find_launchd_label(account_name: &str, tunnel_name: &str) -> String {
     // First check if the new label exists in launchctl
@@ -331,7 +334,10 @@ fn service_name(account_name: &str, tunnel_name: &str) -> String {
         // Legacy format for migration compatibility
         format!("{}{}.service", SYSTEMD_SERVICE_PREFIX, tunnel_name)
     } else {
-        format!("{}{}-{}.service", SYSTEMD_SERVICE_PREFIX, account_name, tunnel_name)
+        format!(
+            "{}{}-{}.service",
+            SYSTEMD_SERVICE_PREFIX, account_name, tunnel_name
+        )
     }
 }
 

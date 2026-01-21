@@ -490,7 +490,10 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             };
 
             if is_ephemeral {
-                format!(" [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+                format!(
+                    " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
+                    account_hint
+                )
             } else {
                 format!(" [a]dd [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
             }

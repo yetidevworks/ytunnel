@@ -1,8 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -258,7 +256,10 @@ impl App {
     pub fn next_account(&mut self) {
         if !self.accounts.is_empty() {
             self.selected_account_idx = (self.selected_account_idx + 1) % self.accounts.len();
-            self.status_message = Some(format!("Switched to account: {}", self.current_account_name()));
+            self.status_message = Some(format!(
+                "Switched to account: {}",
+                self.current_account_name()
+            ));
         }
     }
 
@@ -735,9 +736,10 @@ impl App {
         let target = self.new_tunnel_target.take().unwrap();
         let zone = self.zones.get(self.zone_selected).unwrap().clone();
 
-        let acct = self.current_account().ok_or_else(|| {
-            anyhow::anyhow!("No account selected")
-        })?.clone();
+        let acct = self
+            .current_account()
+            .ok_or_else(|| anyhow::anyhow!("No account selected"))?
+            .clone();
         let client = cloudflare::Client::new(&acct.api_token);
 
         let tunnel_name = format!("ytunnel-{}", name);
@@ -1056,9 +1058,10 @@ impl App {
 
     // Directly import an ephemeral tunnel without prompts
     async fn direct_import(&mut self, ephemeral: &PersistentTunnel) -> Result<()> {
-        let acct = self.current_account().ok_or_else(|| {
-            anyhow::anyhow!("No account selected")
-        })?.clone();
+        let acct = self
+            .current_account()
+            .ok_or_else(|| anyhow::anyhow!("No account selected"))?
+            .clone();
         let client = cloudflare::Client::new(&acct.api_token);
 
         // Ensure DNS record exists
@@ -1133,9 +1136,10 @@ impl App {
             .map(|e| e.tunnel.tunnel_id.clone())
             .ok_or_else(|| anyhow::anyhow!("Ephemeral tunnel not found"))?;
 
-        let acct = self.current_account().ok_or_else(|| {
-            anyhow::anyhow!("No account selected")
-        })?.clone();
+        let acct = self
+            .current_account()
+            .ok_or_else(|| anyhow::anyhow!("No account selected"))?
+            .clone();
         let client = cloudflare::Client::new(&acct.api_token);
 
         let hostname = format!("{}.{}", name, zone.name);
@@ -1226,7 +1230,7 @@ impl App {
 
         if is_ephemeral {
             // Ephemeral tunnel: just delete from Cloudflare
-            if let (Some(ref acct), Some(tid)) = (self.current_account(), tunnel_id) {
+            if let (Some(acct), Some(tid)) = (self.current_account(), tunnel_id) {
                 let client = cloudflare::Client::new(&acct.api_token);
                 client.delete_tunnel(&acct.account_id, &tid).await.ok();
 
@@ -1247,7 +1251,7 @@ impl App {
             let mut state = TunnelState::load()?;
             if let Some(tunnel) = state.remove(&name) {
                 // Delete from Cloudflare
-                if let Some(ref acct) = self.current_account() {
+                if let Some(acct) = self.current_account() {
                     let client = cloudflare::Client::new(&acct.api_token);
                     client
                         .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
@@ -1293,11 +1297,7 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 

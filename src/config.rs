@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// A single Cloudflare account configuration
+// A single Cloudflare account configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
@@ -14,7 +14,7 @@ pub struct Account {
     pub zones: Vec<ZoneConfig>,
 }
 
-/// The main configuration with multi-account support
+// The main configuration with multi-account support
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub selected_account: String,
@@ -22,7 +22,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Get an account by name, or the selected account if name is None
+    // Get an account by name, or the selected account if name is None
     pub fn get_account(&self, name: Option<&str>) -> Result<&Account> {
         let account_name = name.unwrap_or(&self.selected_account);
         self.accounts
@@ -36,7 +36,7 @@ impl Config {
             })
     }
 
-    /// Get a mutable account by name, or the selected account if name is None
+    // Get a mutable account by name, or the selected account if name is None
     pub fn get_account_mut(&mut self, name: Option<&str>) -> Result<&mut Account> {
         let account_name = name.unwrap_or(&self.selected_account).to_string();
         self.accounts
@@ -50,7 +50,7 @@ impl Config {
             })
     }
 
-    /// Add a new account
+    // Add a new account
     pub fn add_account(&mut self, account: Account) -> Result<()> {
         if self.accounts.iter().any(|a| a.name == account.name) {
             bail!("Account '{}' already exists", account.name);
@@ -59,7 +59,7 @@ impl Config {
         Ok(())
     }
 
-    /// Remove an account by name
+    // Remove an account by name
     pub fn remove_account(&mut self, name: &str) -> Result<Account> {
         let pos = self
             .accounts
@@ -77,7 +77,7 @@ impl Config {
         Ok(account)
     }
 
-    /// Set the selected account
+    // Set the selected account
     pub fn select_account(&mut self, name: &str) -> Result<()> {
         if !self.accounts.iter().any(|a| a.name == name) {
             bail!(
@@ -96,7 +96,7 @@ pub struct ZoneConfig {
     pub name: String,
 }
 
-/// Legacy config format for migration
+// Legacy config format for migration
 #[derive(Debug, Deserialize)]
 struct LegacyConfig {
     api_token: String,

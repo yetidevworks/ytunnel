@@ -381,7 +381,7 @@ impl Client {
         Ok(())
     }
 
-    /// Delete a DNS record by hostname
+    // Delete a DNS record by hostname
     pub async fn delete_dns_record(&self, zone_id: &str, hostname: &str) -> Result<()> {
         // First find the record
         let record = self.get_dns_record(zone_id, hostname).await?;

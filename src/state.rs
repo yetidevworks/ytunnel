@@ -27,6 +27,9 @@ impl TunnelStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentTunnel {
     pub name: String,
+    // Which account owns this tunnel (defaults to selected account for migration)
+    #[serde(default)]
+    pub account_name: String,
     pub target: String,
     pub zone_id: String,
     pub zone_name: String,
@@ -105,6 +108,27 @@ impl TunnelState {
         Ok(state)
     }
 
+    // Load tunnel state and migrate any tunnels with empty account_name
+    // to the specified default account
+    pub fn load_and_migrate(default_account: &str) -> Result<Self> {
+        let mut state = Self::load()?;
+
+        // Check if any tunnels need migration
+        let needs_migration = state.tunnels.iter().any(|t| t.account_name.is_empty());
+
+        if needs_migration {
+            for tunnel in &mut state.tunnels {
+                if tunnel.account_name.is_empty() {
+                    tunnel.account_name = default_account.to_string();
+                }
+            }
+            // Save the migrated state
+            state.save()?;
+        }
+
+        Ok(state)
+    }
+
     // Save the tunnel state to disk
     pub fn save(&self) -> Result<()> {
         let dir = config::config_dir()?;
@@ -119,14 +143,40 @@ impl TunnelState {
         Ok(())
     }
 
-    // Find a tunnel by name
+    // Find a tunnel by name (searches all accounts)
     pub fn find(&self, name: &str) -> Option<&PersistentTunnel> {
         self.tunnels.iter().find(|t| t.name == name)
     }
 
-    // Find a tunnel by name (mutable)
+    // Find a tunnel by name (mutable, searches all accounts)
     pub fn find_mut(&mut self, name: &str) -> Option<&mut PersistentTunnel> {
         self.tunnels.iter_mut().find(|t| t.name == name)
+    }
+
+    // Find a tunnel by name for a specific account
+    pub fn find_for_account(&self, name: &str, account: &str) -> Option<&PersistentTunnel> {
+        self.tunnels
+            .iter()
+            .find(|t| t.name == name && t.account_name == account)
+    }
+
+    // Find a tunnel by name for a specific account (mutable)
+    pub fn find_for_account_mut(
+        &mut self,
+        name: &str,
+        account: &str,
+    ) -> Option<&mut PersistentTunnel> {
+        self.tunnels
+            .iter_mut()
+            .find(|t| t.name == name && t.account_name == account)
+    }
+
+    // Get all tunnels for a specific account
+    pub fn tunnels_for_account(&self, account: &str) -> Vec<&PersistentTunnel> {
+        self.tunnels
+            .iter()
+            .filter(|t| t.account_name == account)
+            .collect()
     }
 
     // Add a new tunnel
@@ -134,9 +184,22 @@ impl TunnelState {
         self.tunnels.push(tunnel);
     }
 
-    // Remove a tunnel by name
+    // Remove a tunnel by name (from any account)
     pub fn remove(&mut self, name: &str) -> Option<PersistentTunnel> {
         if let Some(pos) = self.tunnels.iter().position(|t| t.name == name) {
+            Some(self.tunnels.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    // Remove a tunnel by name for a specific account
+    pub fn remove_for_account(&mut self, name: &str, account: &str) -> Option<PersistentTunnel> {
+        if let Some(pos) = self
+            .tunnels
+            .iter()
+            .position(|t| t.name == name && t.account_name == account)
+        {
             Some(self.tunnels.remove(pos))
         } else {
             None

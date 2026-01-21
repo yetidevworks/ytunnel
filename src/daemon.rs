@@ -27,21 +27,86 @@ fn launch_agents_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_label(tunnel_name: &str) -> String {
+fn launchd_label(account_name: &str, tunnel_name: &str) -> String {
+    if account_name.is_empty() {
+        // Legacy format for migration compatibility
+        format!("{}.{}", LAUNCHD_LABEL_PREFIX, tunnel_name)
+    } else {
+        format!("{}.{}.{}", LAUNCHD_LABEL_PREFIX, account_name, tunnel_name)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_launchd_label(tunnel_name: &str) -> String {
     format!("{}.{}", LAUNCHD_LABEL_PREFIX, tunnel_name)
 }
 
 #[cfg(target_os = "macos")]
-fn plist_path(tunnel_name: &str) -> Result<PathBuf> {
+fn plist_path(account_name: &str, tunnel_name: &str) -> Result<PathBuf> {
     let agents_dir = launch_agents_dir()?;
-    Ok(agents_dir.join(format!("{}.plist", launchd_label(tunnel_name))))
+    Ok(agents_dir.join(format!("{}.plist", launchd_label(account_name, tunnel_name))))
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_plist_path(tunnel_name: &str) -> Result<PathBuf> {
+    let agents_dir = launch_agents_dir()?;
+    Ok(agents_dir.join(format!("{}.plist", legacy_launchd_label(tunnel_name))))
+}
+
+/// Find the actual plist path - checks new naming first, then legacy
+#[cfg(target_os = "macos")]
+fn find_plist_path(account_name: &str, tunnel_name: &str) -> Result<Option<PathBuf>> {
+    // First check the new naming convention
+    let new_path = plist_path(account_name, tunnel_name)?;
+    if new_path.exists() {
+        return Ok(Some(new_path));
+    }
+
+    // Fall back to legacy naming (without account)
+    let legacy_path = legacy_plist_path(tunnel_name)?;
+    if legacy_path.exists() {
+        return Ok(Some(legacy_path));
+    }
+
+    Ok(None)
+}
+
+/// Find the actual launchd label for a tunnel - checks new naming first, then legacy
+#[cfg(target_os = "macos")]
+async fn find_launchd_label(account_name: &str, tunnel_name: &str) -> String {
+    // First check if the new label exists in launchctl
+    let new_label = launchd_label(account_name, tunnel_name);
+    if is_label_loaded(&new_label).await {
+        return new_label;
+    }
+
+    // Check if legacy label exists
+    let legacy_label = legacy_launchd_label(tunnel_name);
+    if is_label_loaded(&legacy_label).await {
+        return legacy_label;
+    }
+
+    // Default to new label (for new installations)
+    new_label
+}
+
+#[cfg(target_os = "macos")]
+async fn is_label_loaded(label: &str) -> bool {
+    let output = Command::new("launchctl")
+        .args(["list", label])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+
+    matches!(output, Ok(out) if out.status.success())
 }
 
 #[cfg(target_os = "macos")]
 fn generate_plist(tunnel: &PersistentTunnel) -> Result<String> {
     let config_path = tunnel.config_path()?;
     let log_path = tunnel.log_path()?;
-    let label = launchd_label(&tunnel.name);
+    let label = launchd_label(&tunnel.account_name, &tunnel.name);
     let metrics_port = tunnel.get_metrics_port();
     let run_at_load = if tunnel.auto_start { "true" } else { "false" };
 
@@ -106,7 +171,7 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
     write_tunnel_config(tunnel)?;
 
     let plist_content = generate_plist(tunnel)?;
-    let path = plist_path(&tunnel.name)?;
+    let path = plist_path(&tunnel.account_name, &tunnel.name)?;
     fs::write(&path, &plist_content)
         .with_context(|| format!("Failed to write plist to {}", path.display()))?;
 
@@ -114,28 +179,37 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
-    stop_daemon(tunnel_name).await.ok();
+pub async fn uninstall_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    stop_daemon(tunnel_name, account_name).await.ok();
 
-    let path = plist_path(tunnel_name)?;
-    if path.exists() {
-        fs::remove_file(&path)
-            .with_context(|| format!("Failed to remove plist: {}", path.display()))?;
+    // Remove both new and legacy plist paths if they exist
+    let new_path = plist_path(account_name, tunnel_name)?;
+    if new_path.exists() {
+        fs::remove_file(&new_path)
+            .with_context(|| format!("Failed to remove plist: {}", new_path.display()))?;
+    }
+
+    let legacy_path = legacy_plist_path(tunnel_name)?;
+    if legacy_path.exists() {
+        fs::remove_file(&legacy_path)
+            .with_context(|| format!("Failed to remove legacy plist: {}", legacy_path.display()))?;
     }
 
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
-    let path = plist_path(tunnel_name)?;
-
-    if !path.exists() {
-        anyhow::bail!(
-            "Plist not found for tunnel '{}'. Try adding it again.",
-            tunnel_name
-        );
-    }
+pub async fn start_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    // Check both new and legacy paths
+    let path = match find_plist_path(account_name, tunnel_name)? {
+        Some(p) => p,
+        None => {
+            anyhow::bail!(
+                "Plist not found for tunnel '{}'. Try adding it again.",
+                tunnel_name
+            );
+        }
+    };
 
     let output = Command::new("launchctl")
         .args(["load", "-w"])
@@ -155,12 +229,12 @@ pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
-    let path = plist_path(tunnel_name)?;
-
-    if !path.exists() {
-        return Ok(());
-    }
+pub async fn stop_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    // Check both new and legacy paths
+    let path = match find_plist_path(account_name, tunnel_name)? {
+        Some(p) => p,
+        None => return Ok(()), // No plist found, nothing to stop
+    };
 
     let output = Command::new("launchctl")
         .args(["unload"])
@@ -180,8 +254,10 @@ pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn is_daemon_running(tunnel_name: &str) -> bool {
-    let label = launchd_label(tunnel_name);
+pub async fn is_daemon_running(tunnel_name: &str, account_name: &str) -> bool {
+    // Check both new and legacy labels
+    let new_label = launchd_label(account_name, tunnel_name);
+    let legacy_label = legacy_launchd_label(tunnel_name);
 
     let output = Command::new("launchctl")
         .args(["list"])
@@ -195,7 +271,7 @@ pub async fn is_daemon_running(tunnel_name: &str) -> bool {
             let stdout = String::from_utf8_lossy(&out.stdout);
             stdout.lines().any(|line| {
                 let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 && parts[2] == label {
+                if parts.len() >= 3 && (parts[2] == new_label || parts[2] == legacy_label) {
                     parts[0].parse::<u32>().is_ok()
                 } else {
                     false
@@ -208,7 +284,8 @@ pub async fn is_daemon_running(tunnel_name: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
-    let label = launchd_label(&tunnel.name);
+    // Find the actual label being used (new or legacy)
+    let label = find_launchd_label(&tunnel.account_name, &tunnel.name).await;
 
     let output = Command::new("launchctl")
         .args(["list", &label])
@@ -224,7 +301,7 @@ pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
                 // Running if: good exit status, no exit status info, or still actually running
                 if stdout.contains("\"LastExitStatus\" = 0")
                     || !stdout.contains("\"LastExitStatus\"")
-                    || is_daemon_running(&tunnel.name).await
+                    || is_daemon_running(&tunnel.name, &tunnel.account_name).await
                 {
                     TunnelStatus::Running
                 } else {
@@ -249,14 +326,19 @@ fn systemd_user_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn service_name(tunnel_name: &str) -> String {
-    format!("{}{}.service", SYSTEMD_SERVICE_PREFIX, tunnel_name)
+fn service_name(account_name: &str, tunnel_name: &str) -> String {
+    if account_name.is_empty() {
+        // Legacy format for migration compatibility
+        format!("{}{}.service", SYSTEMD_SERVICE_PREFIX, tunnel_name)
+    } else {
+        format!("{}{}-{}.service", SYSTEMD_SERVICE_PREFIX, account_name, tunnel_name)
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn service_path(tunnel_name: &str) -> Result<PathBuf> {
+fn service_path(account_name: &str, tunnel_name: &str) -> Result<PathBuf> {
     let systemd_dir = systemd_user_dir()?;
-    Ok(systemd_dir.join(service_name(tunnel_name)))
+    Ok(systemd_dir.join(service_name(account_name, tunnel_name)))
 }
 
 #[cfg(target_os = "linux")]
@@ -325,7 +407,7 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
     write_tunnel_config(tunnel)?;
 
     let service_content = generate_service(tunnel)?;
-    let path = service_path(&tunnel.name)?;
+    let path = service_path(&tunnel.account_name, &tunnel.name)?;
     fs::write(&path, &service_content)
         .with_context(|| format!("Failed to write service file to {}", path.display()))?;
 
@@ -333,7 +415,7 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
 
     // Enable if auto_start is set
     if tunnel.auto_start {
-        let svc = service_name(&tunnel.name);
+        let svc = service_name(&tunnel.account_name, &tunnel.name);
         Command::new("systemctl")
             .args(["--user", "enable", &svc])
             .output()
@@ -341,7 +423,7 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
             .context("Failed to enable service")?;
     } else {
         // Disable if auto_start is false
-        let svc = service_name(&tunnel.name);
+        let svc = service_name(&tunnel.account_name, &tunnel.name);
         Command::new("systemctl")
             .args(["--user", "disable", &svc])
             .output()
@@ -353,8 +435,8 @@ pub async fn install_daemon(tunnel: &PersistentTunnel) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
-    let svc = service_name(tunnel_name);
+pub async fn uninstall_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    let svc = service_name(account_name, tunnel_name);
 
     // Stop and disable
     Command::new("systemctl")
@@ -370,7 +452,7 @@ pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
         .ok();
 
     // Remove the service file
-    let path = service_path(tunnel_name)?;
+    let path = service_path(account_name, tunnel_name)?;
     if path.exists() {
         fs::remove_file(&path)
             .with_context(|| format!("Failed to remove service file: {}", path.display()))?;
@@ -382,8 +464,8 @@ pub async fn uninstall_daemon(tunnel_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
-    let path = service_path(tunnel_name)?;
+pub async fn start_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    let path = service_path(account_name, tunnel_name)?;
 
     if !path.exists() {
         anyhow::bail!(
@@ -392,7 +474,7 @@ pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
         );
     }
 
-    let svc = service_name(tunnel_name);
+    let svc = service_name(account_name, tunnel_name);
     let output = Command::new("systemctl")
         .args(["--user", "start", &svc])
         .output()
@@ -408,14 +490,14 @@ pub async fn start_daemon(tunnel_name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
-    let path = service_path(tunnel_name)?;
+pub async fn stop_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
+    let path = service_path(account_name, tunnel_name)?;
 
     if !path.exists() {
         return Ok(());
     }
 
-    let svc = service_name(tunnel_name);
+    let svc = service_name(account_name, tunnel_name);
     let output = Command::new("systemctl")
         .args(["--user", "stop", &svc])
         .output()
@@ -435,8 +517,8 @@ pub async fn stop_daemon(tunnel_name: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 #[allow(dead_code)] // Public API for consistency with macOS
-pub async fn is_daemon_running(tunnel_name: &str) -> bool {
-    let svc = service_name(tunnel_name);
+pub async fn is_daemon_running(tunnel_name: &str, account_name: &str) -> bool {
+    let svc = service_name(account_name, tunnel_name);
 
     let output = Command::new("systemctl")
         .args(["--user", "is-active", &svc])
@@ -456,7 +538,7 @@ pub async fn is_daemon_running(tunnel_name: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
-    let svc = service_name(&tunnel.name);
+    let svc = service_name(&tunnel.account_name, &tunnel.name);
 
     let output = Command::new("systemctl")
         .args(["--user", "is-active", &svc])
@@ -544,22 +626,22 @@ pub async fn install_daemon(_tunnel: &PersistentTunnel) -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub async fn uninstall_daemon(_tunnel_name: &str) -> Result<()> {
+pub async fn uninstall_daemon(_tunnel_name: &str, _account_name: &str) -> Result<()> {
     anyhow::bail!("Daemon management is not supported on this platform")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub async fn start_daemon(_tunnel_name: &str) -> Result<()> {
+pub async fn start_daemon(_tunnel_name: &str, _account_name: &str) -> Result<()> {
     anyhow::bail!("Daemon management is not supported on this platform. Use 'ytunnel run' for ephemeral tunnels.")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub async fn stop_daemon(_tunnel_name: &str) -> Result<()> {
+pub async fn stop_daemon(_tunnel_name: &str, _account_name: &str) -> Result<()> {
     anyhow::bail!("Daemon management is not supported on this platform")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub async fn is_daemon_running(_tunnel_name: &str) -> bool {
+pub async fn is_daemon_running(_tunnel_name: &str, _account_name: &str) -> bool {
     false
 }
 

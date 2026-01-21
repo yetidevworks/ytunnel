@@ -380,6 +380,36 @@ impl Client {
 
         Ok(())
     }
+
+    /// Delete a DNS record by hostname
+    pub async fn delete_dns_record(&self, zone_id: &str, hostname: &str) -> Result<()> {
+        // First find the record
+        let record = self.get_dns_record(zone_id, hostname).await?;
+
+        if let Some(record) = record {
+            let url = format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, record.id);
+
+            let resp: ApiResponse<serde_json::Value> = self
+                .http
+                .delete(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .context("Failed to delete DNS record")?
+                .json()
+                .await
+                .context("Failed to parse delete DNS record response")?;
+
+            if !resp.success {
+                anyhow::bail!(
+                    "Failed to delete DNS record: {}",
+                    format_errors(&resp.errors)
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {

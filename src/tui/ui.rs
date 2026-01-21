@@ -175,6 +175,18 @@ fn render_help_modal(f: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
+            "ACCOUNTS",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ;        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Cycle through accounts"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
             "METRICS",
             Style::default()
                 .fg(Color::Yellow)
@@ -201,7 +213,16 @@ fn render_help_modal(f: &mut Frame) {
 }
 
 fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
-    let title = format!(" Tunnels ({}) ", app.tunnels.len());
+    // Show account name in title if there are multiple accounts
+    let title = if app.accounts.len() > 1 {
+        format!(
+            " Tunnels ({}) [{}] ",
+            app.tunnels.len(),
+            app.current_account_name()
+        )
+    } else {
+        format!(" Tunnels ({}) ", app.tunnels.len())
+    };
 
     let items: Vec<ListItem> = app
         .tunnels
@@ -461,10 +482,17 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 .map(|e| e.kind == TunnelKind::Ephemeral)
                 .unwrap_or(false);
 
-            if is_ephemeral {
-                " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
+            // Show account switching hint if multiple accounts
+            let account_hint = if app.accounts.len() > 1 {
+                " [;]account"
             } else {
-                " [a]dd [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh [?]help [q]uit".to_string()
+                ""
+            };
+
+            if is_ephemeral {
+                format!(" [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+            } else {
+                format!(" [a]dd [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

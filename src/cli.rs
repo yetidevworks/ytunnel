@@ -5,6 +5,10 @@ use clap::{Parser, Subcommand};
 #[command(about = "Simple Cloudflare Tunnel CLI for custom domains", long_about = None)]
 #[command(version)]
 pub struct Cli {
+    /// Use a specific account (overrides the default selected account)
+    #[arg(long, global = true)]
+    pub account: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -102,6 +106,40 @@ pub enum Commands {
     // Reset ytunnel configuration (allows re-initializing with new credentials)
     Reset {
         // Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Manage Cloudflare accounts
+    Account {
+        #[command(subcommand)]
+        command: Option<AccountCommands>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AccountCommands {
+    /// List all configured accounts
+    List,
+
+    /// Set the default account
+    Select {
+        /// Account name to select as default
+        name: String,
+    },
+
+    /// Alias for select - set the default account
+    Default {
+        /// Account name to select as default
+        name: String,
+    },
+
+    /// Remove an account
+    Remove {
+        /// Account name to remove
+        name: String,
+
+        /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
     },

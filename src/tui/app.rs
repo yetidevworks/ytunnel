@@ -1,8 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -13,6 +12,7 @@ use std::time::Duration;
 
 use crate::cloudflare;
 use crate::config;
+use crate::config::Account;
 use crate::daemon;
 use crate::metrics::TunnelMetrics;
 use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelStatus};
@@ -190,6 +190,10 @@ pub struct App {
     pub config: Option<config::Config>,
     // Whether we're importing (vs adding) a tunnel
     pub is_importing: bool,
+    // Available accounts
+    pub accounts: Vec<Account>,
+    // Selected account index
+    pub selected_account_idx: usize,
 }
 
 // Actions that require confirmation
@@ -199,7 +203,23 @@ pub enum PendingAction {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(initial_account: Option<&str>) -> Self {
+        // Try to load config and determine initial account index
+        let (config, accounts, selected_account_idx) = if let Ok(cfg) = config::load_config() {
+            let accounts = cfg.accounts.clone();
+            let idx = if let Some(name) = initial_account {
+                accounts.iter().position(|a| a.name == name).unwrap_or(0)
+            } else {
+                accounts
+                    .iter()
+                    .position(|a| a.name == cfg.selected_account)
+                    .unwrap_or(0)
+            };
+            (Some(cfg), accounts, idx)
+        } else {
+            (None, Vec::new(), 0)
+        };
+
         Self {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
@@ -214,27 +234,66 @@ impl App {
             pending_action: None,
             status_message: None,
             should_quit: false,
-            config: None,
+            config,
             is_importing: false,
+            accounts,
+            selected_account_idx,
         }
     }
 
+    // Get the current account name
+    pub fn current_account_name(&self) -> &str {
+        self.accounts
+            .get(self.selected_account_idx)
+            .map(|a| a.name.as_str())
+            .unwrap_or("default")
+    }
+
+    // Get the current account
+    pub fn current_account(&self) -> Option<&Account> {
+        self.accounts.get(self.selected_account_idx)
+    }
+
+    // Switch to the next account
+    pub fn next_account(&mut self) {
+        if !self.accounts.is_empty() {
+            self.selected_account_idx = (self.selected_account_idx + 1) % self.accounts.len();
+            self.status_message = Some(format!("Switched to account: {}", self.current_account_name()));
+        }
+    }
+
+    // Switch to the previous account
     // Load tunnels and their statuses
     pub async fn load_tunnels(&mut self) -> Result<()> {
         // Load config
         self.config = config::load_config().ok();
         if let Some(ref cfg) = self.config {
-            self.zones = cfg.zones.clone();
+            self.accounts = cfg.accounts.clone();
+            // Update zones from current account
+            if let Some(acct) = self.current_account() {
+                self.zones = acct.zones.clone();
+            }
         }
 
-        // Load tunnel state (managed tunnels)
-        let state = TunnelState::load()?;
+        // Get current account name for filtering
+        let current_account_name = self.current_account_name().to_string();
+
+        // Load tunnel state with migration (assigns empty account_name to first account,
+        // since that's typically the original account before multi-account was added)
+        let first_account = self
+            .accounts
+            .first()
+            .map(|a| a.name.as_str())
+            .unwrap_or(&current_account_name);
+        let state = TunnelState::load_and_migrate(first_account)?;
+        // Only get tunnels for the current account
+        let managed_tunnels: Vec<_> = state.tunnels_for_account(&current_account_name);
         let managed_names: std::collections::HashSet<String> =
-            state.tunnels.iter().map(|t| t.name.clone()).collect();
+            managed_tunnels.iter().map(|t| t.name.clone()).collect();
 
         // Get status for each managed tunnel
         let mut entries = Vec::new();
-        for tunnel in state.tunnels {
+        for tunnel in managed_tunnels.into_iter().cloned() {
             let status = daemon::get_daemon_status(&tunnel).await;
             // Fetch metrics for running tunnels
             let (metrics, mut history) = if status == TunnelStatus::Running {
@@ -271,9 +330,9 @@ impl App {
         }
 
         // Query Cloudflare for ephemeral tunnels (ytunnel-* not in state)
-        if let Some(ref cfg) = self.config {
-            let client = cloudflare::Client::new(&cfg.api_token);
-            if let Ok(cf_tunnels) = client.list_tunnels(&cfg.account_id).await {
+        if let Some(acct) = self.current_account() {
+            let client = cloudflare::Client::new(&acct.api_token);
+            if let Ok(cf_tunnels) = client.list_tunnels(&acct.account_id).await {
                 for cf_tunnel in cf_tunnels {
                     // Skip deleted tunnels
                     if cf_tunnel.deleted_at.is_some() {
@@ -303,7 +362,7 @@ impl App {
                     // Try to determine the zone from the hostname
                     let (zone_id, zone_name) = if hostname.contains('.') {
                         // Try to match hostname to a known zone
-                        cfg.zones
+                        acct.zones
                             .iter()
                             .find(|z| hostname.ends_with(&z.name))
                             .map(|z| (z.id.clone(), z.name.clone()))
@@ -314,6 +373,7 @@ impl App {
 
                     let ephemeral = PersistentTunnel {
                         name: short_name.to_string(),
+                        account_name: current_account_name.clone(),
                         target,
                         zone_id,
                         zone_name,
@@ -675,8 +735,10 @@ impl App {
         let target = self.new_tunnel_target.take().unwrap();
         let zone = self.zones.get(self.zone_selected).unwrap().clone();
 
-        let cfg = self.config.as_ref().unwrap();
-        let client = cloudflare::Client::new(&cfg.api_token);
+        let acct = self.current_account().ok_or_else(|| {
+            anyhow::anyhow!("No account selected")
+        })?.clone();
+        let client = cloudflare::Client::new(&acct.api_token);
 
         let tunnel_name = format!("ytunnel-{}", name);
         let hostname = format!("{}.{}", name, zone.name);
@@ -685,7 +747,7 @@ impl App {
 
         // Check if tunnel exists, create if not
         let (tunnel, _credentials_path) = match client
-            .get_tunnel_by_name(&cfg.account_id, &tunnel_name)
+            .get_tunnel_by_name(&acct.account_id, &tunnel_name)
             .await?
         {
             Some(t) => {
@@ -696,7 +758,7 @@ impl App {
                 (t, creds_path)
             }
             None => {
-                let result = client.create_tunnel(&cfg.account_id, &tunnel_name).await?;
+                let result = client.create_tunnel(&acct.account_id, &tunnel_name).await?;
                 (result.tunnel, result.credentials_path)
             }
         };
@@ -709,6 +771,7 @@ impl App {
         // Create persistent tunnel
         let persistent = PersistentTunnel {
             name: name.clone(),
+            account_name: acct.name.clone(),
             target,
             zone_id: zone.id,
             zone_name: zone.name,
@@ -731,7 +794,7 @@ impl App {
         state.save()?;
 
         // Start the daemon
-        daemon::start_daemon(&name).await?;
+        daemon::start_daemon(&name, &acct.name).await?;
 
         self.input_mode = InputMode::Normal;
         self.status_message = Some(format!("Tunnel '{}' created and started", name));
@@ -758,6 +821,7 @@ impl App {
             }
 
             let name = entry.tunnel.name.clone();
+            let account_name = entry.tunnel.account_name.clone();
             self.status_message = Some(format!("Starting {}...", name));
 
             // Ensure config file exists
@@ -767,7 +831,7 @@ impl App {
             daemon::install_daemon(&entry.tunnel).await?;
 
             // Start daemon
-            daemon::start_daemon(&name).await?;
+            daemon::start_daemon(&name, &account_name).await?;
 
             // Update state
             let mut state = TunnelState::load()?;
@@ -794,9 +858,10 @@ impl App {
             }
 
             let name = entry.tunnel.name.clone();
+            let account_name = entry.tunnel.account_name.clone();
             self.status_message = Some(format!("Stopping {}...", name));
 
-            daemon::stop_daemon(&name).await?;
+            daemon::stop_daemon(&name, &account_name).await?;
 
             // Update state
             let mut state = TunnelState::load()?;
@@ -821,17 +886,18 @@ impl App {
             }
 
             let name = entry.tunnel.name.clone();
+            let account_name = entry.tunnel.account_name.clone();
             let tunnel = entry.tunnel.clone();
             self.status_message = Some(format!("Restarting {}...", name));
 
             // Stop the daemon
-            daemon::stop_daemon(&name).await.ok();
+            daemon::stop_daemon(&name, &account_name).await.ok();
 
             // Reinstall daemon (regenerates plist with latest config, including metrics)
             daemon::install_daemon(&tunnel).await?;
 
             // Start the daemon
-            daemon::start_daemon(&name).await?;
+            daemon::start_daemon(&name, &account_name).await?;
 
             // Update state
             let mut state = TunnelState::load()?;
@@ -990,8 +1056,10 @@ impl App {
 
     // Directly import an ephemeral tunnel without prompts
     async fn direct_import(&mut self, ephemeral: &PersistentTunnel) -> Result<()> {
-        let cfg = self.config.as_ref().unwrap();
-        let client = cloudflare::Client::new(&cfg.api_token);
+        let acct = self.current_account().ok_or_else(|| {
+            anyhow::anyhow!("No account selected")
+        })?.clone();
+        let client = cloudflare::Client::new(&acct.api_token);
 
         // Ensure DNS record exists
         client
@@ -1005,6 +1073,7 @@ impl App {
         // Create the managed tunnel entry
         let persistent = PersistentTunnel {
             name: ephemeral.name.clone(),
+            account_name: acct.name.clone(),
             target: ephemeral.target.clone(),
             zone_id: ephemeral.zone_id.clone(),
             zone_name: ephemeral.zone_name.clone(),
@@ -1064,8 +1133,10 @@ impl App {
             .map(|e| e.tunnel.tunnel_id.clone())
             .ok_or_else(|| anyhow::anyhow!("Ephemeral tunnel not found"))?;
 
-        let cfg = self.config.as_ref().unwrap();
-        let client = cloudflare::Client::new(&cfg.api_token);
+        let acct = self.current_account().ok_or_else(|| {
+            anyhow::anyhow!("No account selected")
+        })?.clone();
+        let client = cloudflare::Client::new(&acct.api_token);
 
         let hostname = format!("{}.{}", name, zone.name);
 
@@ -1079,6 +1150,7 @@ impl App {
         // Create persistent tunnel
         let persistent = PersistentTunnel {
             name: name.clone(),
+            account_name: acct.name.clone(),
             target,
             zone_id: zone.id,
             zone_name: zone.name,
@@ -1101,7 +1173,7 @@ impl App {
         state.save()?;
 
         // Start the daemon
-        daemon::start_daemon(&name).await?;
+        daemon::start_daemon(&name, &acct.name).await?;
 
         self.input_mode = InputMode::Normal;
         self.status_message = Some(format!("Imported '{}' as managed tunnel", name));
@@ -1148,12 +1220,15 @@ impl App {
             .map(|e| e.kind == TunnelKind::Ephemeral)
             .unwrap_or(false);
         let tunnel_id = entry.map(|e| e.tunnel.tunnel_id.clone());
+        let account_name = entry
+            .map(|e| e.tunnel.account_name.clone())
+            .unwrap_or_else(|| self.current_account_name().to_string());
 
         if is_ephemeral {
             // Ephemeral tunnel: just delete from Cloudflare
-            if let (Some(ref cfg), Some(tid)) = (&self.config, tunnel_id) {
-                let client = cloudflare::Client::new(&cfg.api_token);
-                client.delete_tunnel(&cfg.account_id, &tid).await.ok();
+            if let (Some(ref acct), Some(tid)) = (self.current_account(), tunnel_id) {
+                let client = cloudflare::Client::new(&acct.api_token);
+                client.delete_tunnel(&acct.account_id, &tid).await.ok();
 
                 // Remove credentials file if it exists
                 let config_dir = crate::config::config_dir()?;
@@ -1163,19 +1238,19 @@ impl App {
         } else {
             // Managed tunnel: full cleanup
             // Stop daemon
-            daemon::stop_daemon(&name).await?;
+            daemon::stop_daemon(&name, &account_name).await?;
 
             // Uninstall daemon
-            daemon::uninstall_daemon(&name).await?;
+            daemon::uninstall_daemon(&name, &account_name).await?;
 
             // Remove from state and get tunnel info
             let mut state = TunnelState::load()?;
             if let Some(tunnel) = state.remove(&name) {
                 // Delete from Cloudflare
-                if let Some(ref cfg) = self.config {
-                    let client = cloudflare::Client::new(&cfg.api_token);
+                if let Some(ref acct) = self.current_account() {
+                    let client = cloudflare::Client::new(&acct.api_token);
                     client
-                        .delete_tunnel(&cfg.account_id, &tunnel.tunnel_id)
+                        .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
                         .await
                         .ok();
                 }
@@ -1206,7 +1281,7 @@ impl App {
 }
 
 // Run the TUI application
-pub async fn run_tui() -> Result<()> {
+pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Check if ytunnel is initialized
     if !crate::config::config_path()?.exists() {
         anyhow::bail!(
@@ -1221,14 +1296,13 @@ pub async fn run_tui() -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
         EnableBracketedPaste
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and load data
-    let mut app = App::new();
+    let mut app = App::new(initial_account);
     if let Err(e) = app.load_tunnels().await {
         // Still show TUI even if load fails
         app.status_message = Some(format!("Error loading tunnels: {}", e));
@@ -1245,7 +1319,6 @@ pub async fn run_tui() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
@@ -1363,6 +1436,15 @@ async fn run_app(
                         KeyCode::Down | KeyCode::Char('j') => {
                             if app.select_next() && app.selected_needs_health_check() {
                                 app.check_health().await;
+                            }
+                        }
+                        KeyCode::Char(';') => {
+                            // Cycle to next account
+                            if app.accounts.len() > 1 {
+                                app.next_account();
+                                if let Err(e) = app.load_tunnels().await {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
                             }
                         }
                         _ => {}

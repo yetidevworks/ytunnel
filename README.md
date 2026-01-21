@@ -19,9 +19,10 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
 - **Live Metrics** - Real-time request counts, error rates, and connection status
 - **Persistent tunnels** - Tunnels run as background daemons (launchd on macOS, systemd on Linux)
 - **Automatic DNS management** - Creates and updates CNAME records automatically
+- **Multi-account support** - Manage tunnels across multiple Cloudflare accounts
 - **Multi-zone support** - Use different domains for different tunnels
 - **SSL/HTTPS** - Automatic via Cloudflare
-- **Ephemeral mode** - Quick one-off tunnels that stop when you exit
+- **Ephemeral mode** - Quick one-off tunnels with automatic cleanup on exit
 
 ## Prerequisites
 
@@ -49,9 +50,9 @@ A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok
    > **Note:** You only need to *install* cloudflared. Do NOT run it as a system service. YTunnel manages cloudflared processes directly.
 
 2. **Cloudflare API Token** with these permissions:
-   - Zone:Read
-   - DNS:Edit
-   - Account > Cloudflare Tunnel:Edit
+   - Zone → Zone → Edit
+   - Zone → DNS → Edit
+   - Account → Cloudflare Tunnel → Edit
 
    Create one at: https://dash.cloudflare.com/profile/api-tokens
 
@@ -115,8 +116,8 @@ YTunnel is a **management tool**, not a daemon itself. Here's how the pieces fit
 │              launchd (macOS) / systemd (Linux)                  │
 │              System service manager - always running            │
 │                                                                 │
-│   macOS: ~/Library/LaunchAgents/com.ytunnel.<name>.plist        │
-│   Linux: ~/.config/systemd/user/ytunnel-<name>.service          │
+│   macOS: ~/Library/LaunchAgents/com.ytunnel.<account>.<name>.plist │
+│   Linux: ~/.config/systemd/user/ytunnel-<account>-<name>.service   │
 └─────────────────────────────────────────────────────────────────┘
                                   │
                     Starts/stops/monitors
@@ -203,6 +204,7 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `A` | Toggle auto-start on login (⟳ = enabled) |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
+| `;` | Cycle through accounts (when multiple configured) |
 | `r` | Refresh status |
 | `↑/↓` or `j/k` | Navigate list |
 | `q` | Quit |
@@ -288,6 +290,28 @@ ytunnel run myapp localhost:3000
 ytunnel run api -z dev.example.com localhost:8080
 ```
 
+### Account Management
+
+```bash
+# Add a new account (interactive)
+ytunnel init
+
+# List all configured accounts
+ytunnel account list
+
+# Set the default account
+ytunnel account select production
+# or
+ytunnel account default production
+
+# Remove an account
+ytunnel account remove old-account
+
+# Use a specific account for any command
+ytunnel add myapp localhost:3000 --account production
+ytunnel list --account dev
+```
+
 ### Zone Management
 
 ```bash
@@ -310,7 +334,7 @@ ytunnel zones default dev.example.com
 | `~/Library/Application Support/ytunnel/<tunnel-id>.json` | Cloudflare tunnel credentials |
 | `~/Library/Application Support/ytunnel/tunnel-configs/<name>.yml` | cloudflared config files |
 | `~/Library/Application Support/ytunnel/logs/<name>.log` | Tunnel daemon logs |
-| `~/Library/LaunchAgents/com.ytunnel.<name>.plist` | launchd service files |
+| `~/Library/LaunchAgents/com.ytunnel.<account>.<name>.plist` | launchd service files |
 
 **Linux:**
 | Path | Purpose |
@@ -320,21 +344,36 @@ ytunnel zones default dev.example.com
 | `~/.config/ytunnel/<tunnel-id>.json` | Cloudflare tunnel credentials |
 | `~/.config/ytunnel/tunnel-configs/<name>.yml` | cloudflared config files |
 | `~/.config/ytunnel/logs/<name>.log` | Tunnel daemon logs |
-| `~/.config/systemd/user/ytunnel-<name>.service` | systemd service files |
+| `~/.config/systemd/user/ytunnel-<account>-<name>.service` | systemd service files |
 
 ### Main Config
 
 Config file location: `~/Library/Application Support/ytunnel/config.toml` (macOS) or `~/.config/ytunnel/config.toml` (Linux):
 
 ```toml
+selected_account = "dev"
+
+[[accounts]]
+name = "dev"
 api_token = "your-token"
 account_id = "your-account-id"
 default_zone_id = "zone-id"
 default_zone_name = "example.com"
 
-[[zones]]
+[[accounts.zones]]
 id = "zone-id"
 name = "example.com"
+
+[[accounts]]
+name = "production"
+api_token = "another-token"
+account_id = "another-account-id"
+default_zone_id = "prod-zone-id"
+default_zone_name = "mysite.io"
+
+[[accounts.zones]]
+id = "prod-zone-id"
+name = "mysite.io"
 ```
 
 ### Tunnel State
@@ -344,6 +383,7 @@ name = "example.com"
 ```toml
 [[tunnels]]
 name = "myapp"
+account_name = "dev"
 target = "localhost:3000"
 zone_id = "abc123"
 zone_name = "example.com"
@@ -387,61 +427,32 @@ tail -f ~/.config/ytunnel/logs/myapp.log                       # Linux
 
 **macOS:**
 ```bash
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+# Stop (replace <account> with your account name, e.g., "dev")
+launchctl unload ~/Library/LaunchAgents/com.ytunnel.<account>.myapp.plist
 
 # Start
-launchctl load ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+launchctl load ~/Library/LaunchAgents/com.ytunnel.<account>.myapp.plist
 
 # Remove completely
-launchctl unload ~/Library/LaunchAgents/com.ytunnel.myapp.plist
-rm ~/Library/LaunchAgents/com.ytunnel.myapp.plist
+launchctl unload ~/Library/LaunchAgents/com.ytunnel.<account>.myapp.plist
+rm ~/Library/LaunchAgents/com.ytunnel.<account>.myapp.plist
 ```
 
 **Linux:**
 ```bash
-# Stop
-systemctl --user stop ytunnel-myapp.service
+# Stop (replace <account> with your account name, e.g., "dev")
+systemctl --user stop ytunnel-<account>-myapp.service
 
 # Start
-systemctl --user start ytunnel-myapp.service
+systemctl --user start ytunnel-<account>-myapp.service
 
 # Remove completely
-systemctl --user stop ytunnel-myapp.service
-systemctl --user disable ytunnel-myapp.service
-rm ~/.config/systemd/user/ytunnel-myapp.service
+systemctl --user stop ytunnel-<account>-myapp.service
+systemctl --user disable ytunnel-<account>-myapp.service
+rm ~/.config/systemd/user/ytunnel-<account>-myapp.service
 systemctl --user daemon-reload
 ```
 
-## Changelog
-
-### v0.3.3
-
-- **Updated dependencies** - ratatui 0.30, crossterm 0.29
-
-### v0.3.2
-
-- **Fix init check** - TUI now properly exits with message if `ytunnel init` hasn't been run
-
-### v0.3.1
-
-- **Homebrew tap support** - Install via `brew install yetidevworks/ytunnel/ytunnel`
-
-### v0.3.0
-
-- **Health indicators in tunnel list** - Show red ⚠ warning next to unhealthy tunnels
-- **Check all tunnels health** - Periodic health checks now run for all running tunnels, not just selected
-
-### v0.2.0
-
-- **Remote desktop support** - Fixed TUI input issues when using remote desktop/screen sharing (supports key repeat events and paste input)
-- **Fixed add tunnel modal** - Input text now renders correctly in the add tunnel dialog
-- **Reset command** - Added `ytunnel reset` to remove all configuration and start fresh
-- **Init protection** - Prevents accidental re-initialization if already configured
-
-### v0.1.0
-
-- Initial release with TUI dashboard, persistent tunnels, ephemeral mode, and live metrics
 
 ## License
 

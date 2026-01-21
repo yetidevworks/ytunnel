@@ -2,34 +2,34 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Metrics collected from cloudflared's Prometheus endpoint
+// Metrics collected from cloudflared's Prometheus endpoint
 #[derive(Debug, Clone, Default)]
 pub struct TunnelMetrics {
-    /// Total number of requests handled
+    // Total number of requests handled
     pub total_requests: u64,
-    /// Number of request errors
+    // Number of request errors
     pub request_errors: u64,
-    /// Number of active HA connections to Cloudflare edge
+    // Number of active HA connections to Cloudflare edge
     pub ha_connections: u64,
-    /// Number of currently active/concurrent requests
+    // Number of currently active/concurrent requests
     pub concurrent_requests: u64,
-    /// Response counts by status code
+    // Response counts by status code
     pub response_codes: HashMap<u16, u64>,
-    /// Connected edge locations (e.g., "dfw08", "den01")
+    // Connected edge locations (e.g., "dfw08", "den01")
     pub edge_locations: Vec<String>,
-    /// Whether metrics were successfully fetched
+    // Whether metrics were successfully fetched
     pub available: bool,
 }
 
 impl TunnelMetrics {
-    /// Fetch metrics from a cloudflared metrics endpoint
+    // Fetch metrics from a cloudflared metrics endpoint
     pub async fn fetch(metrics_url: &str) -> Self {
         fetch_metrics_internal(metrics_url)
             .await
             .unwrap_or_default()
     }
 
-    /// Get the list of edge locations as a string
+    // Get the list of edge locations as a string
     pub fn locations_string(&self) -> String {
         if self.edge_locations.is_empty() {
             "None".to_string()
@@ -50,7 +50,7 @@ async fn fetch_metrics_internal(metrics_url: &str) -> Result<TunnelMetrics> {
     Ok(parse_prometheus_metrics(&text))
 }
 
-/// Parse Prometheus text format metrics
+// Parse Prometheus text format metrics
 fn parse_prometheus_metrics(text: &str) -> TunnelMetrics {
     let mut metrics = TunnelMetrics {
         available: true,
@@ -109,13 +109,13 @@ fn parse_prometheus_metrics(text: &str) -> TunnelMetrics {
     metrics
 }
 
-/// Extract the numeric value from a Prometheus metric line
+// Extract the numeric value from a Prometheus metric line
 fn extract_value(line: &str) -> Option<f64> {
     // Format: metric_name{labels} value or metric_name value
     line.split_whitespace().last()?.parse().ok()
 }
 
-/// Extract status code from response_by_code metric
+// Extract status code from response_by_code metric
 fn extract_status_code(line: &str) -> Option<u16> {
     // Format: cloudflared_tunnel_response_by_code{status_code="200"} 5
     let start = line.find("status_code=\"")? + 13;
@@ -123,7 +123,7 @@ fn extract_status_code(line: &str) -> Option<u16> {
     line[start..end].parse().ok()
 }
 
-/// Extract edge location from server_locations metric
+// Extract edge location from server_locations metric
 fn extract_edge_location(line: &str) -> Option<String> {
     // Format: cloudflared_tunnel_server_locations{connection_id="0",edge_location="dfw08"} 1
     let start = line.find("edge_location=\"")? + 15;

@@ -607,7 +607,7 @@ fn render_confirm_dialog(f: &mut Frame, message: &str) {
     f.render_widget(text, inner);
 }
 
-/// Create a centered rect of given percentage of the parent
+// Create a centered rect of given percentage of the parent
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)

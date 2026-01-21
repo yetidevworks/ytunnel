@@ -19,7 +19,7 @@ use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelSta
 
 use super::ui;
 
-/// Parse an ephemeral tunnel's config file to extract hostname and target
+// Parse an ephemeral tunnel's config file to extract hostname and target
 fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
     let config_dir = crate::config::config_dir().ok()?;
     let config_path = config_dir.join(format!("tunnel-{}.yml", tunnel_id));
@@ -62,7 +62,7 @@ fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
     }
 }
 
-/// Input mode for the TUI
+// Input mode for the TUI
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -73,16 +73,16 @@ pub enum InputMode {
     Help,
 }
 
-/// Whether a tunnel is managed (persistent) or ephemeral
+// Whether a tunnel is managed (persistent) or ephemeral
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelKind {
-    /// Managed tunnel with launchd daemon
+    // Managed tunnel with launchd daemon
     Managed,
-    /// Ephemeral tunnel (created with `ytunnel run`, not in state)
+    // Ephemeral tunnel (created with `ytunnel run`, not in state)
     Ephemeral,
 }
 
-/// Health check status for a tunnel
+// Health check status for a tunnel
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HealthStatus {
     #[default]
@@ -92,19 +92,19 @@ pub enum HealthStatus {
     Checking,
 }
 
-/// Historical metrics for sparkline display
+// Historical metrics for sparkline display
 #[derive(Debug, Clone, Default)]
 pub struct MetricsHistory {
-    /// Request counts over time (last 30 samples)
+    // Request counts over time (last 30 samples)
     pub request_samples: Vec<u64>,
-    /// Last known total requests (to calculate delta)
+    // Last known total requests (to calculate delta)
     pub last_total: u64,
 }
 
 impl MetricsHistory {
     const MAX_SAMPLES: usize = 30;
 
-    /// Record a new sample
+    // Record a new sample
     pub fn record(&mut self, total_requests: u64) {
         // Calculate delta since last sample
         let delta = if total_requests >= self.last_total {
@@ -124,7 +124,7 @@ impl MetricsHistory {
         self.last_total = total_requests;
     }
 
-    /// Generate sparkline string using Unicode blocks
+    // Generate sparkline string using Unicode blocks
     pub fn sparkline(&self) -> String {
         if self.request_samples.is_empty() {
             return String::new();
@@ -147,7 +147,7 @@ impl MetricsHistory {
     }
 }
 
-/// A tunnel entry with its runtime status
+// A tunnel entry with its runtime status
 #[derive(Debug, Clone)]
 pub struct TunnelEntry {
     pub tunnel: PersistentTunnel,
@@ -158,41 +158,41 @@ pub struct TunnelEntry {
     pub health: HealthStatus,
 }
 
-/// Application state
+// Application state
 pub struct App {
-    /// Current input mode
+    // Current input mode
     pub input_mode: InputMode,
-    /// List of tunnels with status
+    // List of tunnels with status
     pub tunnels: Vec<TunnelEntry>,
-    /// Currently selected tunnel index
+    // Currently selected tunnel index
     pub selected: usize,
-    /// Log lines for the selected tunnel
+    // Log lines for the selected tunnel
     pub logs: Vec<String>,
-    /// Input buffer for add dialog
+    // Input buffer for add dialog
     pub input: String,
-    /// Temporary storage for new tunnel name during add flow
+    // Temporary storage for new tunnel name during add flow
     pub new_tunnel_name: Option<String>,
-    /// Temporary storage for new tunnel target during add flow
+    // Temporary storage for new tunnel target during add flow
     pub new_tunnel_target: Option<String>,
-    /// Available zones for selection
+    // Available zones for selection
     pub zones: Vec<config::ZoneConfig>,
-    /// Selected zone index during add flow
+    // Selected zone index during add flow
     pub zone_selected: usize,
-    /// Confirmation message
+    // Confirmation message
     pub confirm_message: Option<String>,
-    /// Action to perform on confirmation
+    // Action to perform on confirmation
     pub pending_action: Option<PendingAction>,
-    /// Status message to display
+    // Status message to display
     pub status_message: Option<String>,
-    /// Should quit
+    // Should quit
     pub should_quit: bool,
-    /// Config loaded
+    // Config loaded
     pub config: Option<config::Config>,
-    /// Whether we're importing (vs adding) a tunnel
+    // Whether we're importing (vs adding) a tunnel
     pub is_importing: bool,
 }
 
-/// Actions that require confirmation
+// Actions that require confirmation
 #[derive(Debug, Clone)]
 pub enum PendingAction {
     Delete(String),
@@ -219,7 +219,7 @@ impl App {
         }
     }
 
-    /// Load tunnels and their statuses
+    // Load tunnels and their statuses
     pub async fn load_tunnels(&mut self) -> Result<()> {
         // Load config
         self.config = config::load_config().ok();
@@ -361,7 +361,7 @@ impl App {
         Ok(())
     }
 
-    /// Refresh logs for the selected tunnel
+    // Refresh logs for the selected tunnel
     pub fn refresh_logs(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             match entry.kind {
@@ -404,7 +404,7 @@ impl App {
         }
     }
 
-    /// Refresh metrics for the selected tunnel
+    // Refresh metrics for the selected tunnel
     pub async fn refresh_metrics(&mut self) {
         if let Some(entry) = self.tunnels.get_mut(self.selected) {
             if entry.kind == TunnelKind::Managed && entry.status == TunnelStatus::Running {
@@ -419,12 +419,12 @@ impl App {
         }
     }
 
-    /// Check health of the selected tunnel by making an HTTP request
+    // Check health of the selected tunnel by making an HTTP request
     pub async fn check_health(&mut self) {
         self.check_health_for_index(self.selected).await;
     }
 
-    /// Check health of all running tunnels
+    // Check health of all running tunnels
     pub async fn check_all_health(&mut self) {
         for i in 0..self.tunnels.len() {
             if self.tunnels[i].status == TunnelStatus::Running {
@@ -433,7 +433,7 @@ impl App {
         }
     }
 
-    /// Check health for a specific tunnel by index
+    // Check health for a specific tunnel by index
     async fn check_health_for_index(&mut self, index: usize) {
         if let Some(entry) = self.tunnels.get_mut(index) {
             if entry.status != TunnelStatus::Running {
@@ -489,7 +489,7 @@ impl App {
         }
     }
 
-    /// Show health check result and send notifications for state changes
+    // Show health check result and send notifications for state changes
     fn show_health_result(&mut self, tunnel_name: &str, old: HealthStatus, new: HealthStatus) {
         // Always show the result in status bar
         match new {
@@ -522,7 +522,7 @@ impl App {
         }
     }
 
-    /// Send a system notification
+    // Send a system notification
     fn send_system_notification(&self, title: &str, message: &str) {
         use std::process::Command;
 
@@ -554,7 +554,7 @@ impl App {
         }
     }
 
-    /// Get health status for the selected tunnel
+    // Get health status for the selected tunnel
     pub fn selected_health(&self) -> HealthStatus {
         self.tunnels
             .get(self.selected)
@@ -562,14 +562,14 @@ impl App {
             .unwrap_or(HealthStatus::Unknown)
     }
 
-    /// Get metrics for the selected tunnel
+    // Get metrics for the selected tunnel
     pub fn selected_metrics(&self) -> Option<&TunnelMetrics> {
         self.tunnels
             .get(self.selected)
             .and_then(|e| e.metrics.as_ref())
     }
 
-    /// Get sparkline for the selected tunnel
+    // Get sparkline for the selected tunnel
     pub fn selected_sparkline(&self) -> String {
         self.tunnels
             .get(self.selected)
@@ -577,7 +577,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Move selection up
+    // Move selection up
     pub fn select_previous(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected > 0 {
             self.selected -= 1;
@@ -587,7 +587,7 @@ impl App {
         false
     }
 
-    /// Move selection down
+    // Move selection down
     pub fn select_next(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
             self.selected += 1;
@@ -597,7 +597,7 @@ impl App {
         false
     }
 
-    /// Check if selected tunnel needs a health check (unknown or stale)
+    // Check if selected tunnel needs a health check (unknown or stale)
     pub fn selected_needs_health_check(&self) -> bool {
         self.tunnels
             .get(self.selected)
@@ -605,7 +605,7 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Start the add tunnel flow
+    // Start the add tunnel flow
     pub fn start_add(&mut self) {
         if self.config.is_none() {
             self.status_message = Some("Run 'ytunnel init' first".to_string());
@@ -619,7 +619,7 @@ impl App {
         self.is_importing = false;
     }
 
-    /// Cancel current input
+    // Cancel current input
     pub fn cancel_input(&mut self) {
         self.input_mode = InputMode::Normal;
         self.input.clear();
@@ -629,7 +629,7 @@ impl App {
         self.pending_action = None;
     }
 
-    /// Move to next step in add flow
+    // Move to next step in add flow
     pub fn next_add_step(&mut self) {
         match self.input_mode {
             InputMode::AddName => {
@@ -656,7 +656,7 @@ impl App {
         }
     }
 
-    /// Select zone in add flow (moves selection or confirms)
+    // Select zone in add flow (moves selection or confirms)
     pub fn select_zone_next(&mut self) {
         if !self.zones.is_empty() && self.zone_selected < self.zones.len() - 1 {
             self.zone_selected += 1;
@@ -669,7 +669,7 @@ impl App {
         }
     }
 
-    /// Complete the add tunnel flow
+    // Complete the add tunnel flow
     pub async fn complete_add(&mut self) -> Result<()> {
         let name = self.new_tunnel_name.take().unwrap();
         let target = self.new_tunnel_target.take().unwrap();
@@ -748,7 +748,7 @@ impl App {
         Ok(())
     }
 
-    /// Start the selected tunnel
+    // Start the selected tunnel
     pub async fn start_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
@@ -782,7 +782,7 @@ impl App {
         Ok(())
     }
 
-    /// Stop the selected tunnel
+    // Stop the selected tunnel
     pub async fn stop_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
@@ -811,7 +811,7 @@ impl App {
         Ok(())
     }
 
-    /// Restart the selected tunnel (stop then start, reinstalls daemon config)
+    // Restart the selected tunnel (stop then start, reinstalls daemon config)
     pub async fn restart_selected(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
@@ -846,7 +846,7 @@ impl App {
         Ok(())
     }
 
-    /// Check if selected tunnel is ephemeral
+    // Check if selected tunnel is ephemeral
     pub fn is_selected_ephemeral(&self) -> bool {
         self.tunnels
             .get(self.selected)
@@ -854,7 +854,7 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Copy the selected tunnel's URL to clipboard
+    // Copy the selected tunnel's URL to clipboard
     pub fn copy_url_to_clipboard(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             let url = format!("https://{}", entry.tunnel.hostname);
@@ -887,7 +887,7 @@ impl App {
         }
     }
 
-    /// Open the selected tunnel's URL in browser
+    // Open the selected tunnel's URL in browser
     pub fn open_in_browser(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             let url = format!("https://{}", entry.tunnel.hostname);
@@ -911,7 +911,7 @@ impl App {
         }
     }
 
-    /// Toggle auto-start on login for the selected tunnel
+    // Toggle auto-start on login for the selected tunnel
     pub async fn toggle_auto_start(&mut self) -> Result<()> {
         if let Some(entry) = self.tunnels.get(self.selected) {
             if entry.kind == TunnelKind::Ephemeral {
@@ -944,8 +944,8 @@ impl App {
         Ok(())
     }
 
-    /// Start import flow for ephemeral tunnel
-    /// Returns true if import was started (either directly or via dialog)
+    // Start import flow for ephemeral tunnel
+    // Returns true if import was started (either directly or via dialog)
     pub async fn start_import(&mut self) -> Result<()> {
         if !self.is_selected_ephemeral() {
             self.status_message = Some("Only ephemeral tunnels can be imported".to_string());
@@ -988,7 +988,7 @@ impl App {
         Ok(())
     }
 
-    /// Directly import an ephemeral tunnel without prompts
+    // Directly import an ephemeral tunnel without prompts
     async fn direct_import(&mut self, ephemeral: &PersistentTunnel) -> Result<()> {
         let cfg = self.config.as_ref().unwrap();
         let client = cloudflare::Client::new(&cfg.api_token);
@@ -1050,7 +1050,7 @@ impl App {
         Ok(())
     }
 
-    /// Complete importing an ephemeral tunnel as managed
+    // Complete importing an ephemeral tunnel as managed
     pub async fn complete_import(&mut self) -> Result<()> {
         let name = self.new_tunnel_name.take().unwrap();
         let target = self.new_tunnel_target.take().unwrap();
@@ -1118,7 +1118,7 @@ impl App {
         Ok(())
     }
 
-    /// Request deletion of selected tunnel
+    // Request deletion of selected tunnel
     pub fn request_delete(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
             let msg = if entry.kind == TunnelKind::Ephemeral {
@@ -1138,7 +1138,7 @@ impl App {
         }
     }
 
-    /// Execute confirmed delete
+    // Execute confirmed delete
     pub async fn execute_delete(&mut self, name: String) -> Result<()> {
         self.status_message = Some(format!("Deleting {}...", name));
 
@@ -1205,7 +1205,7 @@ impl App {
     }
 }
 
-/// Run the TUI application
+// Run the TUI application
 pub async fn run_tui() -> Result<()> {
     // Check if ytunnel is initialized
     if !crate::config::config_path()?.exists() {

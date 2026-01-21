@@ -482,7 +482,7 @@ pub async fn get_daemon_status(tunnel: &PersistentTunnel) -> TunnelStatus {
 // Shared utilities
 // ============================================================================
 
-/// Find the path to cloudflared
+// Find the path to cloudflared
 fn which_cloudflared() -> Option<String> {
     #[cfg(target_os = "macos")]
     let paths = [
@@ -512,7 +512,7 @@ fn which_cloudflared() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Read recent log lines for a tunnel
+// Read recent log lines for a tunnel
 pub fn read_log_tail(tunnel: &PersistentTunnel, lines: usize) -> Result<Vec<String>> {
     let log_path = tunnel.log_path()?;
 

@@ -157,7 +157,7 @@ async fn cmd_init() -> Result<()> {
     Ok(())
 }
 
-/// Run an ephemeral tunnel (foreground, stops on Ctrl+C)
+// Run an ephemeral tunnel (foreground, stops on Ctrl+C)
 async fn cmd_run(name: Option<String>, target: String, zone: Option<String>) -> Result<()> {
     let cfg = config::load_config()?;
     let client = cloudflare::Client::new(&cfg.api_token);
@@ -248,7 +248,7 @@ async fn cmd_run(name: Option<String>, target: String, zone: Option<String>) -> 
     Ok(())
 }
 
-/// Add a persistent tunnel (non-interactive CLI command)
+// Add a persistent tunnel (non-interactive CLI command)
 async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool) -> Result<()> {
     let cfg = config::load_config()?;
     let client = cloudflare::Client::new(&cfg.api_token);
@@ -352,7 +352,7 @@ async fn cmd_add(name: String, target: String, zone: Option<String>, start: bool
     Ok(())
 }
 
-/// Start a stopped tunnel
+// Start a stopped tunnel
 async fn cmd_start(name: String) -> Result<()> {
     let mut state = TunnelState::load()?;
 
@@ -388,7 +388,7 @@ async fn cmd_start(name: String) -> Result<()> {
     Ok(())
 }
 
-/// Stop a running tunnel
+// Stop a running tunnel
 async fn cmd_stop(name: String) -> Result<()> {
     let mut state = TunnelState::load()?;
 
@@ -417,7 +417,7 @@ async fn cmd_stop(name: String) -> Result<()> {
     Ok(())
 }
 
-/// Restart a running tunnel (stop, reinstall daemon config, start)
+// Restart a running tunnel (stop, reinstall daemon config, start)
 async fn cmd_restart(name: String) -> Result<()> {
     let state = TunnelState::load()?;
 
@@ -456,7 +456,7 @@ async fn cmd_restart(name: String) -> Result<()> {
     Ok(())
 }
 
-/// View logs for a tunnel
+// View logs for a tunnel
 async fn cmd_logs(name: String, follow: bool, lines: usize) -> Result<()> {
     let state = TunnelState::load()?;
 
@@ -623,7 +623,7 @@ async fn cmd_delete(name: String) -> Result<()> {
     Ok(())
 }
 
-/// Reset ytunnel configuration (allows re-initialization)
+// Reset ytunnel configuration (allows re-initialization)
 async fn cmd_reset(skip_confirm: bool) -> Result<()> {
     // Check if ytunnel is even configured
     if !config::config_path()?.exists() {

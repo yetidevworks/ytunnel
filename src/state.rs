@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::config;
 
-/// Represents the current runtime status of a tunnel
+// Represents the current runtime status of a tunnel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelStatus {
     Running,
@@ -23,7 +23,7 @@ impl TunnelStatus {
     }
 }
 
-/// A persistent tunnel configuration stored in tunnels.toml
+// A persistent tunnel configuration stored in tunnels.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentTunnel {
     pub name: String,
@@ -33,36 +33,36 @@ pub struct PersistentTunnel {
     pub hostname: String,
     pub tunnel_id: String,
     pub enabled: bool,
-    /// Whether to auto-start on login (RunAtLoad in launchd)
+    // Whether to auto-start on login (RunAtLoad in launchd)
     #[serde(default)]
     pub auto_start: bool,
-    /// Port for cloudflared metrics endpoint (optional, calculated if not set)
+    // Port for cloudflared metrics endpoint (optional, calculated if not set)
     #[serde(default)]
     pub metrics_port: Option<u16>,
 }
 
 impl PersistentTunnel {
-    /// Get the path to the credentials file for this tunnel
+    // Get the path to the credentials file for this tunnel
     pub fn credentials_path(&self) -> Result<PathBuf> {
         let config_dir = config::config_dir()?;
         Ok(config_dir.join(format!("{}.json", self.tunnel_id)))
     }
 
-    /// Get the path to the tunnel config file
+    // Get the path to the tunnel config file
     pub fn config_path(&self) -> Result<PathBuf> {
         let config_dir = config::config_dir()?;
         let configs_dir = config_dir.join("tunnel-configs");
         Ok(configs_dir.join(format!("{}.yml", self.name)))
     }
 
-    /// Get the path to the log file for this tunnel
+    // Get the path to the log file for this tunnel
     pub fn log_path(&self) -> Result<PathBuf> {
         let config_dir = config::config_dir()?;
         let logs_dir = config_dir.join("logs");
         Ok(logs_dir.join(format!("{}.log", self.name)))
     }
 
-    /// Get the metrics port for this tunnel (calculates from name hash if not set)
+    // Get the metrics port for this tunnel (calculates from name hash if not set)
     pub fn get_metrics_port(&self) -> u16 {
         self.metrics_port.unwrap_or_else(|| {
             // Calculate a port based on the tunnel name hash
@@ -75,13 +75,13 @@ impl PersistentTunnel {
         })
     }
 
-    /// Get the metrics URL for this tunnel
+    // Get the metrics URL for this tunnel
     pub fn metrics_url(&self) -> String {
         format!("http://localhost:{}/metrics", self.get_metrics_port())
     }
 }
 
-/// The collection of all persistent tunnels
+// The collection of all persistent tunnels
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TunnelState {
     #[serde(default)]
@@ -89,7 +89,7 @@ pub struct TunnelState {
 }
 
 impl TunnelState {
-    /// Load the tunnel state from disk
+    // Load the tunnel state from disk
     pub fn load() -> Result<Self> {
         let path = tunnels_path()?;
         if !path.exists() {
@@ -105,7 +105,7 @@ impl TunnelState {
         Ok(state)
     }
 
-    /// Save the tunnel state to disk
+    // Save the tunnel state to disk
     pub fn save(&self) -> Result<()> {
         let dir = config::config_dir()?;
         fs::create_dir_all(&dir)
@@ -119,22 +119,22 @@ impl TunnelState {
         Ok(())
     }
 
-    /// Find a tunnel by name
+    // Find a tunnel by name
     pub fn find(&self, name: &str) -> Option<&PersistentTunnel> {
         self.tunnels.iter().find(|t| t.name == name)
     }
 
-    /// Find a tunnel by name (mutable)
+    // Find a tunnel by name (mutable)
     pub fn find_mut(&mut self, name: &str) -> Option<&mut PersistentTunnel> {
         self.tunnels.iter_mut().find(|t| t.name == name)
     }
 
-    /// Add a new tunnel
+    // Add a new tunnel
     pub fn add(&mut self, tunnel: PersistentTunnel) {
         self.tunnels.push(tunnel);
     }
 
-    /// Remove a tunnel by name
+    // Remove a tunnel by name
     pub fn remove(&mut self, name: &str) -> Option<PersistentTunnel> {
         if let Some(pos) = self.tunnels.iter().position(|t| t.name == name) {
             Some(self.tunnels.remove(pos))
@@ -144,12 +144,12 @@ impl TunnelState {
     }
 }
 
-/// Get the path to the tunnels.toml file
+// Get the path to the tunnels.toml file
 pub fn tunnels_path() -> Result<PathBuf> {
     Ok(config::config_dir()?.join("tunnels.toml"))
 }
 
-/// Ensure the tunnel-configs directory exists
+// Ensure the tunnel-configs directory exists
 pub fn ensure_configs_dir() -> Result<PathBuf> {
     let config_dir = config::config_dir()?;
     let configs_dir = config_dir.join("tunnel-configs");
@@ -162,7 +162,7 @@ pub fn ensure_configs_dir() -> Result<PathBuf> {
     Ok(configs_dir)
 }
 
-/// Ensure the logs directory exists
+// Ensure the logs directory exists
 pub fn ensure_logs_dir() -> Result<PathBuf> {
     let config_dir = config::config_dir()?;
     let logs_dir = config_dir.join("logs");
@@ -171,7 +171,7 @@ pub fn ensure_logs_dir() -> Result<PathBuf> {
     Ok(logs_dir)
 }
 
-/// Generate the cloudflared config YAML content for a tunnel
+// Generate the cloudflared config YAML content for a tunnel
 pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
     let credentials_path = tunnel.credentials_path()?;
 
@@ -200,7 +200,7 @@ ingress:
     Ok(config)
 }
 
-/// Write the cloudflared config file for a tunnel
+// Write the cloudflared config file for a tunnel
 pub fn write_tunnel_config(tunnel: &PersistentTunnel) -> Result<PathBuf> {
     ensure_configs_dir()?;
     let config_path = tunnel.config_path()?;

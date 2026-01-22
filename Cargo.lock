@@ -2734,12 +2734,13 @@ dependencies = [
 
 [[package]]
 name = "ytunnel"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "rand 0.9.2",
  "ratatui",
  "reqwest",

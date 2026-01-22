@@ -69,6 +69,8 @@ pub fn render(f: &mut Frame, app: &App) {
             app.is_importing,
         ),
         InputMode::AddZone => render_zone_dialog(f, app),
+        InputMode::EditTarget => render_edit_dialog(f, app, "Edit target URL:"),
+        InputMode::EditZone => render_edit_zone_dialog(f, app),
         InputMode::Confirm => {
             if let Some(ref msg) = app.confirm_message {
                 render_confirm_dialog(f, msg);
@@ -124,6 +126,10 @@ fn render_help_modal(f: &mut Frame) {
         Line::from(vec![
             Span::styled("  a        ", Style::default().fg(Color::Cyan)),
             Span::raw("Add a new tunnel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  e        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Edit tunnel (target URL and zone)"),
         ]),
         Line::from(vec![
             Span::styled("  s        ", Style::default().fg(Color::Cyan)),
@@ -455,17 +461,23 @@ fn render_metrics(
 }
 
 fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
-    let status_text = app.status_message.as_deref().unwrap_or("");
-
-    let style = if status_text.starts_with("Error") {
-        Style::default().fg(Color::Red)
-    } else if status_text.contains("Imported")
-        || status_text.contains("Started")
-        || status_text.contains("Deleted")
-    {
-        Style::default().fg(Color::Green)
+    // Show spinner if active, otherwise show status message
+    let (status_text, style) = if let Some(spinner_text) = app.spinner.display() {
+        (spinner_text, Style::default().fg(Color::Cyan))
     } else {
-        Style::default().fg(Color::Yellow)
+        let text = app.status_message.as_deref().unwrap_or("").to_string();
+        let style = if text.starts_with("Error") {
+            Style::default().fg(Color::Red)
+        } else if text.contains("Imported")
+            || text.contains("Started")
+            || text.contains("Deleted")
+            || text.contains("updated")
+        {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        (text, style)
     };
 
     let status = Paragraph::new(format!(" {}", status_text)).style(style);
@@ -495,13 +507,15 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                     account_hint
                 )
             } else {
-                format!(" [a]dd [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+                format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
             }
         }
         InputMode::AddName | InputMode::AddTarget => {
             " Enter value, then press Enter. Esc to cancel.".to_string()
         }
         InputMode::AddZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
+        InputMode::EditTarget => " Edit target URL, then press Enter. Esc to cancel.".to_string(),
+        InputMode::EditZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
         InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
         InputMode::Help => " Press Esc or ? to close help".to_string(),
     };
@@ -534,7 +548,12 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
         Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
         Line::from(""),
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(input, Style::default().fg(Color::Green)),
             Span::styled("_", Style::default().fg(Color::White)),
         ]),
@@ -582,7 +601,10 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Select zone:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Select zone:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from(""),
     ];
 
@@ -591,15 +613,142 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
         let selected = i == app.zone_selected;
         let prefix = if selected { "> " } else { "  " };
         let style = if selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
-        lines.push(Line::from(Span::styled(format!("{}{}", prefix, zone.name), style)));
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, zone.name),
+            style,
+        )));
     }
 
     // Calculate scroll to keep selected item visible
     // Available height = area height - borders (2) - padding (2)
+    let available_height = area.height.saturating_sub(4) as usize;
+    let scroll = if available_height > header_lines {
+        let visible_zones = available_height - header_lines;
+        if app.zone_selected >= visible_zones {
+            (app.zone_selected - visible_zones + 1) as u16
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let content = Paragraph::new(lines)
+        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)))
+        .scroll((scroll, 0));
+
+    f.render_widget(content, area);
+}
+
+fn render_edit_dialog(f: &mut Frame, app: &App, prompt: &str) {
+    let area = centered_rect(60, 30, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Edit Tunnel ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    f.render_widget(block, area);
+
+    // Build styled content showing tunnel being edited
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("Editing: "),
+            Span::styled(
+                app.editing_tunnel_name.as_deref().unwrap_or(""),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(&app.input, Style::default().fg(Color::Green)),
+            Span::styled("_", Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    let text = Paragraph::new(lines)
+        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
+
+    f.render_widget(text, area);
+}
+
+fn render_edit_zone_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 50, f.area());
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Edit: Select Zone ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    f.render_widget(block, area);
+
+    // Build zone lines with selection indicator
+    let header_lines = 6; // Editing, Name, Target, empty, Select zone:, empty
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::raw("Editing: "),
+            Span::styled(
+                app.editing_tunnel_name.as_deref().unwrap_or(""),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("New Target: "),
+            Span::styled(
+                app.new_tunnel_target.as_deref().unwrap_or(""),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Select zone:",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+    ];
+
+    // Add zone options
+    for (i, zone) in app.zones.iter().enumerate() {
+        let selected = i == app.zone_selected;
+        let is_original = app.original_zone_id.as_deref() == Some(&zone.id);
+        let prefix = if selected { "> " } else { "  " };
+        let suffix = if is_original { " (current)" } else { "" };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}{}", prefix, zone.name, suffix),
+            style,
+        )));
+    }
+
+    // Calculate scroll to keep selected item visible
     let available_height = area.height.saturating_sub(4) as usize;
     let scroll = if available_height > header_lines {
         let visible_zones = available_height - header_lines;

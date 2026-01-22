@@ -1,6 +1,6 @@
 [package]
 name = "ytunnel"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "TUI-first CLI for managing Cloudflare Tunnels with custom domains"
 authors = ["YetiDevWorks"]
@@ -23,3 +23,4 @@ anyhow = "1"
 rand = "0.9"
 ratatui = "0.30"
 crossterm = "0.29"
+libc = "0.2"

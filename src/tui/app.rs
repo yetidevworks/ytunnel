@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -16,6 +19,296 @@ use crate::metrics::TunnelMetrics;
 use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelStatus};
 
 use super::ui;
+
+// Check if a key event is a cancel key (Esc or Ctrl+C)
+fn is_cancel_key(key: &crossterm::event::KeyEvent) -> bool {
+    if key.kind == KeyEventKind::Release {
+        return false;
+    }
+    key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+// Standalone async operation: start a tunnel (doesn't borrow App)
+async fn start_tunnel_op(
+    name: String,
+    account_name: String,
+    tunnel: PersistentTunnel,
+) -> Result<String> {
+    write_tunnel_config(&tunnel)?;
+    daemon::install_daemon(&tunnel).await?;
+    daemon::start_daemon(&name, &account_name).await?;
+
+    let mut state = TunnelState::load()?;
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = true;
+    }
+    state.save()?;
+
+    Ok(name)
+}
+
+// Standalone async operation: stop a tunnel
+async fn stop_tunnel_op(name: String, account_name: String) -> Result<String> {
+    daemon::stop_daemon(&name, &account_name).await?;
+
+    let mut state = TunnelState::load()?;
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = false;
+    }
+    state.save()?;
+
+    Ok(name)
+}
+
+// Standalone async operation: restart a tunnel
+async fn restart_tunnel_op(
+    name: String,
+    account_name: String,
+    tunnel: PersistentTunnel,
+) -> Result<String> {
+    daemon::stop_daemon(&name, &account_name).await.ok();
+    daemon::install_daemon(&tunnel).await?;
+    daemon::start_daemon(&name, &account_name).await?;
+
+    let mut state = TunnelState::load()?;
+    if let Some(t) = state.find_mut(&name) {
+        t.enabled = true;
+    }
+    state.save()?;
+
+    Ok(name)
+}
+
+// Standalone async operation: create a new tunnel
+async fn create_tunnel_op(
+    name: String,
+    target: String,
+    zone: config::ZoneConfig,
+    account: Account,
+) -> Result<(String, PersistentTunnel)> {
+    let client = cloudflare::Client::new(&account.api_token);
+
+    let tunnel_name = format!("ytunnel-{}", name);
+    let hostname = format!("{}.{}", name, zone.name);
+
+    // Check if tunnel exists, create if not
+    let (tunnel, _credentials_path) = match client
+        .get_tunnel_by_name(&account.account_id, &tunnel_name)
+        .await?
+    {
+        Some(t) => {
+            let creds_path = t.credentials_path()?;
+            if !creds_path.exists() {
+                anyhow::bail!("Credentials missing for existing tunnel");
+            }
+            (t, creds_path)
+        }
+        None => {
+            let result = client
+                .create_tunnel(&account.account_id, &tunnel_name)
+                .await?;
+            (result.tunnel, result.credentials_path)
+        }
+    };
+
+    // Ensure DNS record exists
+    client
+        .ensure_dns_record(&zone.id, &hostname, &tunnel.id)
+        .await?;
+
+    // Create persistent tunnel
+    let persistent = PersistentTunnel {
+        name: name.clone(),
+        account_name: account.name.clone(),
+        target,
+        zone_id: zone.id,
+        zone_name: zone.name,
+        hostname,
+        tunnel_id: tunnel.id,
+        enabled: true,
+        auto_start: false,
+        metrics_port: None,
+    };
+
+    // Write tunnel config
+    write_tunnel_config(&persistent)?;
+
+    // Install daemon
+    daemon::install_daemon(&persistent).await?;
+
+    // Save to state
+    let mut state = TunnelState::load()?;
+    state.add(persistent.clone());
+    state.save()?;
+
+    // Start the daemon
+    daemon::start_daemon(&name, &account.name).await?;
+
+    Ok((name, persistent))
+}
+
+// Standalone async operation: import an ephemeral tunnel
+async fn import_tunnel_op(
+    name: String,
+    target: String,
+    zone: config::ZoneConfig,
+    tunnel_id: String,
+    account: Account,
+) -> Result<String> {
+    let client = cloudflare::Client::new(&account.api_token);
+    let hostname = format!("{}.{}", name, zone.name);
+
+    // Ensure DNS record exists
+    client
+        .ensure_dns_record(&zone.id, &hostname, &tunnel_id)
+        .await?;
+
+    // Create persistent tunnel
+    let persistent = PersistentTunnel {
+        name: name.clone(),
+        account_name: account.name.clone(),
+        target,
+        zone_id: zone.id,
+        zone_name: zone.name,
+        hostname,
+        tunnel_id,
+        enabled: true,
+        auto_start: false,
+        metrics_port: None,
+    };
+
+    // Write tunnel config
+    write_tunnel_config(&persistent)?;
+
+    // Install daemon
+    daemon::install_daemon(&persistent).await?;
+
+    // Save to state
+    let mut state = TunnelState::load()?;
+    state.add(persistent);
+    state.save()?;
+
+    // Start the daemon
+    daemon::start_daemon(&name, &account.name).await?;
+
+    Ok(name)
+}
+
+// Standalone async operation: edit a tunnel
+#[allow(clippy::too_many_arguments)]
+async fn edit_tunnel_op(
+    name: String,
+    new_target: String,
+    new_zone: config::ZoneConfig,
+    original_zone_id: String,
+    original_hostname: String,
+    tunnel_id: String,
+    was_running: bool,
+    account: Account,
+) -> Result<String> {
+    let client = cloudflare::Client::new(&account.api_token);
+
+    // Compute new hostname
+    let new_hostname = format!("{}.{}", name, new_zone.name);
+    let zone_changed = new_zone.id != original_zone_id;
+
+    // If zone changed, handle DNS records
+    if zone_changed {
+        // Delete old DNS record
+        client
+            .delete_dns_record(&original_zone_id, &original_hostname)
+            .await
+            .ok(); // Log but continue
+
+        // Create new DNS record
+        client
+            .ensure_dns_record(&new_zone.id, &new_hostname, &tunnel_id)
+            .await?;
+    }
+
+    // Update state
+    let mut state = TunnelState::load()?;
+    if let Some(tunnel) = state.find_mut(&name) {
+        tunnel.target = new_target;
+        tunnel.zone_id = new_zone.id;
+        tunnel.zone_name = new_zone.name;
+        tunnel.hostname = new_hostname;
+    }
+    state.save()?;
+
+    // Regenerate config YAML
+    if let Some(tunnel) = state.find(&name) {
+        write_tunnel_config(tunnel)?;
+
+        // Reinstall daemon with updated config
+        daemon::install_daemon(tunnel).await?;
+
+        // Restart daemon if it was running
+        if was_running {
+            daemon::start_daemon(&name, &account.name).await?;
+        }
+    }
+
+    Ok(name)
+}
+
+// Standalone async operation: delete a tunnel
+async fn delete_tunnel_op(
+    name: String,
+    account_name: String,
+    is_ephemeral: bool,
+    tunnel_id: Option<String>,
+    account: Option<Account>,
+) -> Result<String> {
+    if is_ephemeral {
+        // Ephemeral tunnel: just delete from Cloudflare
+        if let (Some(acct), Some(tid)) = (account, tunnel_id) {
+            let client = cloudflare::Client::new(&acct.api_token);
+            client.delete_tunnel(&acct.account_id, &tid).await.ok();
+
+            // Remove credentials file if it exists
+            let config_dir = crate::config::config_dir()?;
+            let creds_path = config_dir.join(format!("{}.json", tid));
+            std::fs::remove_file(&creds_path).ok();
+        }
+    } else {
+        // Managed tunnel: full cleanup
+        daemon::stop_daemon(&name, &account_name).await?;
+        daemon::uninstall_daemon(&name, &account_name).await?;
+
+        // Remove from state and get tunnel info
+        let mut state = TunnelState::load()?;
+        if let Some(tunnel) = state.remove(&name) {
+            // Delete from Cloudflare
+            if let Some(acct) = account {
+                let client = cloudflare::Client::new(&acct.api_token);
+                client
+                    .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
+                    .await
+                    .ok();
+            }
+
+            // Remove credentials file
+            if let Ok(creds_path) = tunnel.credentials_path() {
+                std::fs::remove_file(&creds_path).ok();
+            }
+
+            // Remove config file
+            if let Ok(config_path) = tunnel.config_path() {
+                std::fs::remove_file(&config_path).ok();
+            }
+
+            // Remove log file
+            if let Ok(log_path) = tunnel.log_path() {
+                std::fs::remove_file(&log_path).ok();
+            }
+        }
+        state.save()?;
+    }
+
+    Ok(name)
+}
 
 // Parse an ephemeral tunnel's config file to extract hostname and target
 fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
@@ -67,6 +360,8 @@ pub enum InputMode {
     AddName,
     AddTarget,
     AddZone,
+    EditTarget,
+    EditZone,
     Confirm,
     Help,
 }
@@ -88,6 +383,58 @@ pub enum HealthStatus {
     Healthy,
     Unhealthy,
     Checking,
+}
+
+// Animated spinner for async operations
+#[derive(Debug, Clone, Default)]
+pub struct Spinner {
+    // Braille dots animation frames
+    frames: Vec<char>,
+    // Current frame index
+    frame_idx: usize,
+    // Message to display with spinner
+    pub message: Option<String>,
+}
+
+impl Spinner {
+    pub fn new() -> Self {
+        Self {
+            // Classic braille dots spinner
+            frames: vec!['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+            frame_idx: 0,
+            message: None,
+        }
+    }
+
+    // Start the spinner with a message
+    pub fn start(&mut self, message: &str) {
+        self.message = Some(message.to_string());
+        self.frame_idx = 0;
+    }
+
+    // Stop the spinner
+    pub fn stop(&mut self) {
+        self.message = None;
+    }
+
+    // Check if spinner is active
+    pub fn is_active(&self) -> bool {
+        self.message.is_some()
+    }
+
+    // Advance to next frame
+    pub fn tick(&mut self) {
+        if self.is_active() {
+            self.frame_idx = (self.frame_idx + 1) % self.frames.len();
+        }
+    }
+
+    // Get current display string (spinner char + message)
+    pub fn display(&self) -> Option<String> {
+        self.message
+            .as_ref()
+            .map(|msg| format!("{} {}", self.frames[self.frame_idx], msg))
+    }
 }
 
 // Historical metrics for sparkline display
@@ -192,6 +539,14 @@ pub struct App {
     pub accounts: Vec<Account>,
     // Selected account index
     pub selected_account_idx: usize,
+    // Name of tunnel being edited (for edit flow)
+    pub editing_tunnel_name: Option<String>,
+    // Original zone ID (for DNS cleanup if zone changes during edit)
+    pub original_zone_id: Option<String>,
+    // Original hostname (for DNS cleanup if zone changes during edit)
+    pub original_hostname: Option<String>,
+    // Spinner for async operations
+    pub spinner: Spinner,
 }
 
 // Actions that require confirmation
@@ -236,6 +591,10 @@ impl App {
             is_importing: false,
             accounts,
             selected_account_idx,
+            editing_tunnel_name: None,
+            original_zone_id: None,
+            original_hostname: None,
+            spinner: Spinner::new(),
         }
     }
 
@@ -680,6 +1039,57 @@ impl App {
         self.is_importing = false;
     }
 
+    // Start the edit tunnel flow
+    pub fn start_edit(&mut self) {
+        if self.config.is_none() {
+            self.status_message = Some("Run 'ytunnel init' first".to_string());
+            return;
+        }
+
+        let entry = match self.tunnels.get(self.selected) {
+            Some(e) => e,
+            None => {
+                self.status_message = Some("No tunnel selected".to_string());
+                return;
+            }
+        };
+
+        // Only managed tunnels can be edited
+        if entry.kind == TunnelKind::Ephemeral {
+            self.status_message =
+                Some("Cannot edit ephemeral tunnel. Import it first.".to_string());
+            return;
+        }
+
+        // Store original values for comparison/cleanup
+        self.editing_tunnel_name = Some(entry.tunnel.name.clone());
+        self.original_zone_id = Some(entry.tunnel.zone_id.clone());
+        self.original_hostname = Some(entry.tunnel.hostname.clone());
+
+        // Pre-fill input with current target
+        self.input = entry.tunnel.target.clone();
+
+        // Pre-select current zone in zone list
+        self.zone_selected = self
+            .zones
+            .iter()
+            .position(|z| z.id == entry.tunnel.zone_id)
+            .unwrap_or(0);
+
+        // Store tunnel name and start edit flow
+        self.new_tunnel_name = Some(entry.tunnel.name.clone());
+        self.input_mode = InputMode::EditTarget;
+    }
+
+    // Move to next step in edit flow (target -> zone)
+    pub fn next_edit_step(&mut self) {
+        if self.input_mode == InputMode::EditTarget && !self.input.is_empty() {
+            self.new_tunnel_target = Some(self.input.clone());
+            self.input.clear();
+            self.input_mode = InputMode::EditZone;
+        }
+    }
+
     // Cancel current input
     pub fn cancel_input(&mut self) {
         self.input_mode = InputMode::Normal;
@@ -688,6 +1098,9 @@ impl App {
         self.new_tunnel_target = None;
         self.confirm_message = None;
         self.pending_action = None;
+        self.editing_tunnel_name = None;
+        self.original_zone_id = None;
+        self.original_hostname = None;
     }
 
     // Move to next step in add flow
@@ -728,190 +1141,6 @@ impl App {
         if self.zone_selected > 0 {
             self.zone_selected -= 1;
         }
-    }
-
-    // Complete the add tunnel flow
-    pub async fn complete_add(&mut self) -> Result<()> {
-        let name = self.new_tunnel_name.take().unwrap();
-        let target = self.new_tunnel_target.take().unwrap();
-        let zone = self.zones.get(self.zone_selected).unwrap().clone();
-
-        let acct = self
-            .current_account()
-            .ok_or_else(|| anyhow::anyhow!("No account selected"))?
-            .clone();
-        let client = cloudflare::Client::new(&acct.api_token);
-
-        let tunnel_name = format!("ytunnel-{}", name);
-        let hostname = format!("{}.{}", name, zone.name);
-
-        self.status_message = Some(format!("Creating tunnel {}...", name));
-
-        // Check if tunnel exists, create if not
-        let (tunnel, _credentials_path) = match client
-            .get_tunnel_by_name(&acct.account_id, &tunnel_name)
-            .await?
-        {
-            Some(t) => {
-                let creds_path = t.credentials_path()?;
-                if !creds_path.exists() {
-                    anyhow::bail!("Credentials missing for existing tunnel");
-                }
-                (t, creds_path)
-            }
-            None => {
-                let result = client.create_tunnel(&acct.account_id, &tunnel_name).await?;
-                (result.tunnel, result.credentials_path)
-            }
-        };
-
-        // Ensure DNS record exists
-        client
-            .ensure_dns_record(&zone.id, &hostname, &tunnel.id)
-            .await?;
-
-        // Create persistent tunnel
-        let persistent = PersistentTunnel {
-            name: name.clone(),
-            account_name: acct.name.clone(),
-            target,
-            zone_id: zone.id,
-            zone_name: zone.name,
-            hostname,
-            tunnel_id: tunnel.id,
-            enabled: true,
-            auto_start: false,
-            metrics_port: None,
-        };
-
-        // Write tunnel config
-        write_tunnel_config(&persistent)?;
-
-        // Install daemon
-        daemon::install_daemon(&persistent).await?;
-
-        // Save to state
-        let mut state = TunnelState::load()?;
-        state.add(persistent);
-        state.save()?;
-
-        // Start the daemon
-        daemon::start_daemon(&name, &acct.name).await?;
-
-        self.input_mode = InputMode::Normal;
-        self.status_message = Some(format!("Tunnel '{}' created and started", name));
-
-        // Reload tunnels
-        self.load_tunnels().await?;
-
-        // Select the new tunnel
-        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == name) {
-            self.selected = pos;
-            self.refresh_logs();
-        }
-
-        Ok(())
-    }
-
-    // Start the selected tunnel
-    pub async fn start_selected(&mut self) -> Result<()> {
-        if let Some(entry) = self.tunnels.get(self.selected) {
-            if entry.kind == TunnelKind::Ephemeral {
-                self.status_message =
-                    Some("Cannot start ephemeral tunnel. Import it first with 'm'.".to_string());
-                return Ok(());
-            }
-
-            let name = entry.tunnel.name.clone();
-            let account_name = entry.tunnel.account_name.clone();
-            self.status_message = Some(format!("Starting {}...", name));
-
-            // Ensure config file exists
-            write_tunnel_config(&entry.tunnel)?;
-
-            // Ensure daemon is installed
-            daemon::install_daemon(&entry.tunnel).await?;
-
-            // Start daemon
-            daemon::start_daemon(&name, &account_name).await?;
-
-            // Update state
-            let mut state = TunnelState::load()?;
-            if let Some(t) = state.find_mut(&name) {
-                t.enabled = true;
-            }
-            state.save()?;
-
-            self.status_message = Some(format!("Started {}", name));
-            self.load_tunnels().await?;
-        }
-        Ok(())
-    }
-
-    // Stop the selected tunnel
-    pub async fn stop_selected(&mut self) -> Result<()> {
-        if let Some(entry) = self.tunnels.get(self.selected) {
-            if entry.kind == TunnelKind::Ephemeral {
-                self.status_message = Some(
-                    "Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal."
-                        .to_string(),
-                );
-                return Ok(());
-            }
-
-            let name = entry.tunnel.name.clone();
-            let account_name = entry.tunnel.account_name.clone();
-            self.status_message = Some(format!("Stopping {}...", name));
-
-            daemon::stop_daemon(&name, &account_name).await?;
-
-            // Update state
-            let mut state = TunnelState::load()?;
-            if let Some(t) = state.find_mut(&name) {
-                t.enabled = false;
-            }
-            state.save()?;
-
-            self.status_message = Some(format!("Stopped {}", name));
-            self.load_tunnels().await?;
-        }
-        Ok(())
-    }
-
-    // Restart the selected tunnel (stop then start, reinstalls daemon config)
-    pub async fn restart_selected(&mut self) -> Result<()> {
-        if let Some(entry) = self.tunnels.get(self.selected) {
-            if entry.kind == TunnelKind::Ephemeral {
-                self.status_message =
-                    Some("Cannot restart ephemeral tunnel. Import it first with 'm'.".to_string());
-                return Ok(());
-            }
-
-            let name = entry.tunnel.name.clone();
-            let account_name = entry.tunnel.account_name.clone();
-            let tunnel = entry.tunnel.clone();
-            self.status_message = Some(format!("Restarting {}...", name));
-
-            // Stop the daemon
-            daemon::stop_daemon(&name, &account_name).await.ok();
-
-            // Reinstall daemon (regenerates plist with latest config, including metrics)
-            daemon::install_daemon(&tunnel).await?;
-
-            // Start the daemon
-            daemon::start_daemon(&name, &account_name).await?;
-
-            // Update state
-            let mut state = TunnelState::load()?;
-            if let Some(t) = state.find_mut(&name) {
-                t.enabled = true;
-            }
-            state.save()?;
-
-            self.status_message = Some(format!("Restarted {}", name));
-            self.load_tunnels().await?;
-        }
-        Ok(())
     }
 
     // Check if selected tunnel is ephemeral
@@ -1122,78 +1351,6 @@ impl App {
         Ok(())
     }
 
-    // Complete importing an ephemeral tunnel as managed
-    pub async fn complete_import(&mut self) -> Result<()> {
-        let name = self.new_tunnel_name.take().unwrap();
-        let target = self.new_tunnel_target.take().unwrap();
-        let zone = self.zones.get(self.zone_selected).unwrap().clone();
-
-        // Find the ephemeral tunnel to get its tunnel_id
-        let tunnel_id = self
-            .tunnels
-            .iter()
-            .find(|e| e.tunnel.name == name && e.kind == TunnelKind::Ephemeral)
-            .map(|e| e.tunnel.tunnel_id.clone())
-            .ok_or_else(|| anyhow::anyhow!("Ephemeral tunnel not found"))?;
-
-        let acct = self
-            .current_account()
-            .ok_or_else(|| anyhow::anyhow!("No account selected"))?
-            .clone();
-        let client = cloudflare::Client::new(&acct.api_token);
-
-        let hostname = format!("{}.{}", name, zone.name);
-
-        self.status_message = Some(format!("Importing tunnel {}...", name));
-
-        // Ensure DNS record exists
-        client
-            .ensure_dns_record(&zone.id, &hostname, &tunnel_id)
-            .await?;
-
-        // Create persistent tunnel
-        let persistent = PersistentTunnel {
-            name: name.clone(),
-            account_name: acct.name.clone(),
-            target,
-            zone_id: zone.id,
-            zone_name: zone.name,
-            hostname,
-            tunnel_id,
-            enabled: true,
-            auto_start: false,
-            metrics_port: None,
-        };
-
-        // Write tunnel config
-        write_tunnel_config(&persistent)?;
-
-        // Install daemon
-        daemon::install_daemon(&persistent).await?;
-
-        // Save to state
-        let mut state = TunnelState::load()?;
-        state.add(persistent);
-        state.save()?;
-
-        // Start the daemon
-        daemon::start_daemon(&name, &acct.name).await?;
-
-        self.input_mode = InputMode::Normal;
-        self.status_message = Some(format!("Imported '{}' as managed tunnel", name));
-
-        // Reload tunnels
-        self.load_tunnels().await?;
-
-        // Select the imported tunnel
-        if let Some(pos) = self.tunnels.iter().position(|t| t.tunnel.name == name) {
-            self.selected = pos;
-            self.refresh_logs();
-        }
-
-        Ok(())
-    }
-
     // Request deletion of selected tunnel
     pub fn request_delete(&mut self) {
         if let Some(entry) = self.tunnels.get(self.selected) {
@@ -1212,75 +1369,6 @@ impl App {
             self.pending_action = Some(PendingAction::Delete(entry.tunnel.name.clone()));
             self.input_mode = InputMode::Confirm;
         }
-    }
-
-    // Execute confirmed delete
-    pub async fn execute_delete(&mut self, name: String) -> Result<()> {
-        self.status_message = Some(format!("Deleting {}...", name));
-
-        // Find the entry to check if it's ephemeral
-        let entry = self.tunnels.iter().find(|e| e.tunnel.name == name);
-        let is_ephemeral = entry
-            .map(|e| e.kind == TunnelKind::Ephemeral)
-            .unwrap_or(false);
-        let tunnel_id = entry.map(|e| e.tunnel.tunnel_id.clone());
-        let account_name = entry
-            .map(|e| e.tunnel.account_name.clone())
-            .unwrap_or_else(|| self.current_account_name().to_string());
-
-        if is_ephemeral {
-            // Ephemeral tunnel: just delete from Cloudflare
-            if let (Some(acct), Some(tid)) = (self.current_account(), tunnel_id) {
-                let client = cloudflare::Client::new(&acct.api_token);
-                client.delete_tunnel(&acct.account_id, &tid).await.ok();
-
-                // Remove credentials file if it exists
-                let config_dir = crate::config::config_dir()?;
-                let creds_path = config_dir.join(format!("{}.json", tid));
-                std::fs::remove_file(&creds_path).ok();
-            }
-        } else {
-            // Managed tunnel: full cleanup
-            // Stop daemon
-            daemon::stop_daemon(&name, &account_name).await?;
-
-            // Uninstall daemon
-            daemon::uninstall_daemon(&name, &account_name).await?;
-
-            // Remove from state and get tunnel info
-            let mut state = TunnelState::load()?;
-            if let Some(tunnel) = state.remove(&name) {
-                // Delete from Cloudflare
-                if let Some(acct) = self.current_account() {
-                    let client = cloudflare::Client::new(&acct.api_token);
-                    client
-                        .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
-                        .await
-                        .ok();
-                }
-
-                // Remove credentials file
-                if let Ok(creds_path) = tunnel.credentials_path() {
-                    std::fs::remove_file(&creds_path).ok();
-                }
-
-                // Remove config file
-                if let Ok(config_path) = tunnel.config_path() {
-                    std::fs::remove_file(&config_path).ok();
-                }
-
-                // Remove log file
-                if let Ok(log_path) = tunnel.log_path() {
-                    std::fs::remove_file(&log_path).ok();
-                }
-            }
-            state.save()?;
-        }
-
-        self.status_message = Some(format!("Deleted {}", name));
-        self.load_tunnels().await?;
-
-        Ok(())
     }
 }
 
@@ -1338,25 +1426,38 @@ async fn run_app(
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
-        // Refresh metrics periodically
-        if last_metrics_refresh.elapsed() >= metrics_refresh_interval {
+        // Tick spinner animation
+        app.spinner.tick();
+
+        // Refresh metrics periodically (skip if spinner is active to avoid blocking)
+        if !app.spinner.is_active() && last_metrics_refresh.elapsed() >= metrics_refresh_interval {
             app.refresh_metrics().await;
             last_metrics_refresh = std::time::Instant::now();
         }
 
-        // Check health of all running tunnels less frequently
-        if last_health_check.elapsed() >= health_check_interval {
+        // Check health of all running tunnels less frequently (skip if spinner is active)
+        if !app.spinner.is_active() && last_health_check.elapsed() >= health_check_interval {
             app.check_all_health().await;
             last_health_check = std::time::Instant::now();
         }
 
+        // Poll for events - use shorter timeout when spinner is active for smooth animation
+        let poll_timeout = if app.spinner.is_active() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(250)
+        };
+
         // Poll for events with timeout for async refresh
-        if event::poll(Duration::from_millis(250))? {
+        if event::poll(poll_timeout)? {
             let event = event::read()?;
 
             // Handle paste events (some remote desktop software sends text as paste)
             if let Event::Paste(text) = &event {
-                if matches!(app.input_mode, InputMode::AddName | InputMode::AddTarget) {
+                if matches!(
+                    app.input_mode,
+                    InputMode::AddName | InputMode::AddTarget | InputMode::EditTarget
+                ) {
                     app.input.push_str(text);
                 }
                 continue;
@@ -1369,6 +1470,43 @@ async fn run_app(
                     continue;
                 }
 
+                // Handle Ctrl+C to quit (before other handlers)
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    app.should_quit = true;
+                    continue;
+                }
+
+                // Handle Ctrl+Z to suspend
+                if key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Restore terminal before suspending
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableBracketedPaste
+                    )?;
+                    terminal.show_cursor()?;
+
+                    // Send SIGTSTP to suspend
+                    #[cfg(unix)]
+                    {
+                        unsafe {
+                            libc::raise(libc::SIGTSTP);
+                        }
+                    }
+
+                    // When resumed, restore terminal
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableBracketedPaste
+                    )?;
+                    // Force full redraw
+                    terminal.clear()?;
+                    continue;
+                }
+
                 match app.input_mode {
                     InputMode::Normal => match key.code {
                         KeyCode::Char('q') => {
@@ -1377,14 +1515,114 @@ async fn run_app(
                         KeyCode::Char('a') => {
                             app.start_add();
                         }
+                        KeyCode::Char('e') => {
+                            app.start_edit();
+                        }
                         KeyCode::Char('s') => {
-                            if let Err(e) = app.start_selected().await {
-                                app.status_message = Some(format!("Error: {}", e));
+                            if let Some(entry) = app.tunnels.get(app.selected) {
+                                if entry.kind == TunnelKind::Ephemeral {
+                                    app.status_message = Some(
+                                        "Cannot start ephemeral tunnel. Import it first with 'm'."
+                                            .to_string(),
+                                    );
+                                } else {
+                                    let name = entry.tunnel.name.clone();
+                                    let account_name = entry.tunnel.account_name.clone();
+                                    let tunnel = entry.tunnel.clone();
+
+                                    app.spinner.start(&format!("Starting {}...", name));
+
+                                    // Create and pin future ONCE
+                                    let fut = start_tunnel_op(name.clone(), account_name, tunnel);
+                                    tokio::pin!(fut);
+
+                                    let result: Result<String> = loop {
+                                        terminal.draw(|f| ui::render(f, app))?;
+
+                                        // Check for cancel (Ctrl+C or Esc)
+                                        if event::poll(Duration::from_millis(10))? {
+                                            if let Event::Key(k) = event::read()? {
+                                                if is_cancel_key(&k) {
+                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                                }
+                                            }
+                                        }
+
+                                        tokio::select! {
+                                            biased;
+                                            res = &mut fut => break res,
+                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                app.spinner.tick();
+                                            }
+                                        }
+                                    };
+
+                                    app.spinner.stop();
+                                    match result {
+                                        Ok(name) => {
+                                            app.status_message = Some(format!("Started {}", name));
+                                            app.load_tunnels().await?;
+                                        }
+                                        Err(e) if e.to_string() == "Cancelled" => {
+                                            app.status_message = Some("Cancelled".to_string());
+                                        }
+                                        Err(e) => {
+                                            app.status_message = Some(format!("Error: {}", e));
+                                        }
+                                    }
+                                }
                             }
                         }
                         KeyCode::Char('S') => {
-                            if let Err(e) = app.stop_selected().await {
-                                app.status_message = Some(format!("Error: {}", e));
+                            if let Some(entry) = app.tunnels.get(app.selected) {
+                                if entry.kind == TunnelKind::Ephemeral {
+                                    app.status_message = Some(
+                                        "Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal."
+                                            .to_string(),
+                                    );
+                                } else {
+                                    let name = entry.tunnel.name.clone();
+                                    let account_name = entry.tunnel.account_name.clone();
+
+                                    app.spinner.start(&format!("Stopping {}...", name));
+
+                                    let fut = stop_tunnel_op(name.clone(), account_name);
+                                    tokio::pin!(fut);
+
+                                    let result: Result<String> = loop {
+                                        terminal.draw(|f| ui::render(f, app))?;
+
+                                        if event::poll(Duration::from_millis(10))? {
+                                            if let Event::Key(k) = event::read()? {
+                                                if is_cancel_key(&k) {
+                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                                }
+                                            }
+                                        }
+
+                                        tokio::select! {
+                                            biased;
+                                            res = &mut fut => break res,
+                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                app.spinner.tick();
+                                            }
+                                        }
+                                    };
+
+                                    app.spinner.stop();
+                                    match result {
+                                        Ok(name) => {
+                                            app.status_message = Some(format!("Stopped {}", name));
+                                            app.load_tunnels().await?;
+                                        }
+                                        Err(e) if e.to_string() == "Cancelled" => {
+                                            app.status_message = Some("Cancelled".to_string());
+                                        }
+                                        Err(e) => {
+                                            app.status_message = Some(format!("Error: {}", e));
+                                        }
+                                    }
+                                }
                             }
                         }
                         KeyCode::Char('d') => {
@@ -1396,19 +1634,71 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('r') => {
+                            // Refresh is typically quick, just show status
+                            app.status_message = Some("Refreshing...".to_string());
+                            terminal.draw(|f| ui::render(f, app))?;
+
                             if let Err(e) = app.load_tunnels().await {
                                 app.status_message = Some(format!("Error: {}", e));
                             } else {
                                 app.status_message = Some("Refreshed".to_string());
-                                // Check health of selected tunnel after refresh
                                 if app.selected_needs_health_check() {
                                     app.check_health().await;
                                 }
                             }
                         }
                         KeyCode::Char('R') => {
-                            if let Err(e) = app.restart_selected().await {
-                                app.status_message = Some(format!("Error: {}", e));
+                            if let Some(entry) = app.tunnels.get(app.selected) {
+                                if entry.kind == TunnelKind::Ephemeral {
+                                    app.status_message = Some(
+                                        "Cannot restart ephemeral tunnel. Import it first with 'm'."
+                                            .to_string(),
+                                    );
+                                } else {
+                                    let name = entry.tunnel.name.clone();
+                                    let account_name = entry.tunnel.account_name.clone();
+                                    let tunnel = entry.tunnel.clone();
+
+                                    app.spinner.start(&format!("Restarting {}...", name));
+
+                                    let fut = restart_tunnel_op(name.clone(), account_name, tunnel);
+                                    tokio::pin!(fut);
+
+                                    let result: Result<String> = loop {
+                                        terminal.draw(|f| ui::render(f, app))?;
+
+                                        if event::poll(Duration::from_millis(10))? {
+                                            if let Event::Key(k) = event::read()? {
+                                                if is_cancel_key(&k) {
+                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                                }
+                                            }
+                                        }
+
+                                        tokio::select! {
+                                            biased;
+                                            res = &mut fut => break res,
+                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                app.spinner.tick();
+                                            }
+                                        }
+                                    };
+
+                                    app.spinner.stop();
+                                    match result {
+                                        Ok(name) => {
+                                            app.status_message =
+                                                Some(format!("Restarted {}", name));
+                                            app.load_tunnels().await?;
+                                        }
+                                        Err(e) if e.to_string() == "Cancelled" => {
+                                            app.status_message = Some("Cancelled".to_string());
+                                        }
+                                        Err(e) => {
+                                            app.status_message = Some(format!("Error: {}", e));
+                                        }
+                                    }
+                                }
                             }
                         }
                         KeyCode::Char('c') => {
@@ -1475,14 +1765,298 @@ async fn run_app(
                             app.cancel_input();
                         }
                         KeyCode::Enter => {
-                            let result = if app.is_importing {
-                                app.complete_import().await
-                            } else {
-                                app.complete_add().await
+                            // Extract all data before creating future
+                            let name = match app.new_tunnel_name.clone() {
+                                Some(n) => n,
+                                None => {
+                                    app.status_message = Some("No tunnel name".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
                             };
-                            if let Err(e) = result {
-                                app.status_message = Some(format!("Error: {}", e));
-                                app.input_mode = InputMode::Normal;
+                            let target = match app.new_tunnel_target.clone() {
+                                Some(t) => t,
+                                None => {
+                                    app.status_message = Some("No target URL".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let zone: config::ZoneConfig = match app.zones.get(app.zone_selected) {
+                                Some(z) => z.clone(),
+                                None => {
+                                    app.status_message = Some("No zone selected".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let account: Account = match app.current_account() {
+                                Some(a) => a.clone(),
+                                None => {
+                                    app.status_message = Some("No account selected".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+
+                            let is_importing = app.is_importing;
+                            let msg = if is_importing {
+                                format!("Importing {}...", name)
+                            } else {
+                                format!("Creating {}...", name)
+                            };
+                            app.spinner.start(&msg);
+
+                            // Get tunnel_id for import (from ephemeral tunnel)
+                            let tunnel_id = if is_importing {
+                                app.tunnels
+                                    .iter()
+                                    .find(|e| {
+                                        e.tunnel.name == name && e.kind == TunnelKind::Ephemeral
+                                    })
+                                    .map(|e| e.tunnel.tunnel_id.clone())
+                            } else {
+                                None
+                            };
+
+                            // Create and pin the appropriate future
+                            let result: Result<String> = if is_importing {
+                                let tid = match tunnel_id {
+                                    Some(t) => t,
+                                    None => {
+                                        app.spinner.stop();
+                                        app.status_message =
+                                            Some("Ephemeral tunnel not found".to_string());
+                                        app.input_mode = InputMode::Normal;
+                                        continue;
+                                    }
+                                };
+                                let fut =
+                                    import_tunnel_op(name.clone(), target, zone, tid, account);
+                                tokio::pin!(fut);
+
+                                loop {
+                                    terminal.draw(|f| ui::render(f, app))?;
+
+                                    if event::poll(Duration::from_millis(10))? {
+                                        if let Event::Key(k) = event::read()? {
+                                            if is_cancel_key(&k) {
+                                                break Err(anyhow::anyhow!("Cancelled"));
+                                            }
+                                        }
+                                    }
+
+                                    tokio::select! {
+                                        biased;
+                                        res = &mut fut => break res,
+                                        _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                            app.spinner.tick();
+                                        }
+                                    }
+                                }
+                            } else {
+                                let fut = create_tunnel_op(name.clone(), target, zone, account);
+                                tokio::pin!(fut);
+
+                                loop {
+                                    terminal.draw(|f| ui::render(f, app))?;
+
+                                    if event::poll(Duration::from_millis(10))? {
+                                        if let Event::Key(k) = event::read()? {
+                                            if is_cancel_key(&k) {
+                                                break Err(anyhow::anyhow!("Cancelled"));
+                                            }
+                                        }
+                                    }
+
+                                    tokio::select! {
+                                        biased;
+                                        res = &mut fut => break res.map(|(n, _)| n),
+                                        _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                            app.spinner.tick();
+                                        }
+                                    }
+                                }
+                            };
+
+                            app.spinner.stop();
+                            app.new_tunnel_name = None;
+                            app.new_tunnel_target = None;
+                            app.input_mode = InputMode::Normal;
+
+                            match result {
+                                Ok(name) => {
+                                    let action = if is_importing { "Imported" } else { "Created" };
+                                    app.status_message =
+                                        Some(format!("{} tunnel '{}'", action, name));
+                                    app.load_tunnels().await?;
+                                    // Select the new tunnel
+                                    if let Some(pos) =
+                                        app.tunnels.iter().position(|t| t.tunnel.name == name)
+                                    {
+                                        app.selected = pos;
+                                        app.refresh_logs();
+                                    }
+                                }
+                                Err(e) if e.to_string() == "Cancelled" => {
+                                    app.status_message = Some("Cancelled".to_string());
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.select_zone_prev();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.select_zone_next();
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditTarget => match key.code {
+                        KeyCode::Esc => {
+                            app.cancel_input();
+                        }
+                        KeyCode::Enter => {
+                            app.next_edit_step();
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input.push(c);
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditZone => match key.code {
+                        KeyCode::Esc => {
+                            app.cancel_input();
+                        }
+                        KeyCode::Enter => {
+                            // Extract all data before creating future
+                            let name = match app.editing_tunnel_name.clone() {
+                                Some(n) => n,
+                                None => {
+                                    app.status_message = Some("No tunnel name".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let new_target = match app.new_tunnel_target.clone() {
+                                Some(t) => t,
+                                None => {
+                                    app.status_message = Some("No target URL".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let new_zone: config::ZoneConfig =
+                                match app.zones.get(app.zone_selected) {
+                                    Some(z) => z.clone(),
+                                    None => {
+                                        app.status_message = Some("No zone selected".to_string());
+                                        app.input_mode = InputMode::Normal;
+                                        continue;
+                                    }
+                                };
+                            let original_zone_id = match app.original_zone_id.clone() {
+                                Some(z) => z,
+                                None => {
+                                    app.status_message = Some("Missing original zone".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let original_hostname = match app.original_hostname.clone() {
+                                Some(h) => h,
+                                None => {
+                                    app.status_message =
+                                        Some("Missing original hostname".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let account: Account = match app.current_account() {
+                                Some(a) => a.clone(),
+                                None => {
+                                    app.status_message = Some("No account selected".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+
+                            // Find tunnel info
+                            let entry = match app.tunnels.iter().find(|e| e.tunnel.name == name) {
+                                Some(e) => e,
+                                None => {
+                                    app.status_message = Some("Tunnel not found".to_string());
+                                    app.input_mode = InputMode::Normal;
+                                    continue;
+                                }
+                            };
+                            let was_running = entry.status == TunnelStatus::Running;
+                            let tunnel_id = entry.tunnel.tunnel_id.clone();
+
+                            app.spinner.start(&format!("Updating {}...", name));
+
+                            let fut = edit_tunnel_op(
+                                name.clone(),
+                                new_target,
+                                new_zone,
+                                original_zone_id,
+                                original_hostname,
+                                tunnel_id,
+                                was_running,
+                                account,
+                            );
+                            tokio::pin!(fut);
+
+                            let result: Result<String> = loop {
+                                terminal.draw(|f| ui::render(f, app))?;
+
+                                if event::poll(Duration::from_millis(10))? {
+                                    if let Event::Key(k) = event::read()? {
+                                        if is_cancel_key(&k) {
+                                            break Err(anyhow::anyhow!("Cancelled"));
+                                        }
+                                    }
+                                }
+
+                                tokio::select! {
+                                    biased;
+                                    res = &mut fut => break res,
+                                    _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                        app.spinner.tick();
+                                    }
+                                }
+                            };
+
+                            app.spinner.stop();
+                            app.editing_tunnel_name = None;
+                            app.new_tunnel_target = None;
+                            app.original_zone_id = None;
+                            app.original_hostname = None;
+                            app.input_mode = InputMode::Normal;
+
+                            match result {
+                                Ok(name) => {
+                                    app.status_message = Some(format!("Tunnel '{}' updated", name));
+                                    app.load_tunnels().await?;
+                                    // Select the edited tunnel
+                                    if let Some(pos) =
+                                        app.tunnels.iter().position(|t| t.tunnel.name == name)
+                                    {
+                                        app.selected = pos;
+                                        app.refresh_logs();
+                                    }
+                                }
+                                Err(e) if e.to_string() == "Cancelled" => {
+                                    app.status_message = Some("Cancelled".to_string());
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -1498,8 +2072,61 @@ async fn run_app(
                             if let Some(PendingAction::Delete(name)) = app.pending_action.take() {
                                 app.confirm_message = None;
                                 app.input_mode = InputMode::Normal;
-                                if let Err(e) = app.execute_delete(name).await {
-                                    app.status_message = Some(format!("Error: {}", e));
+
+                                // Extract info from tunnel entry
+                                let entry = app.tunnels.iter().find(|e| e.tunnel.name == name);
+                                let is_ephemeral = entry
+                                    .map(|e| e.kind == TunnelKind::Ephemeral)
+                                    .unwrap_or(false);
+                                let tunnel_id = entry.map(|e| e.tunnel.tunnel_id.clone());
+                                let account_name = entry
+                                    .map(|e| e.tunnel.account_name.clone())
+                                    .unwrap_or_else(|| app.current_account_name().to_string());
+                                let account = app.current_account().cloned();
+
+                                app.spinner.start(&format!("Deleting {}...", name));
+
+                                let fut = delete_tunnel_op(
+                                    name.clone(),
+                                    account_name,
+                                    is_ephemeral,
+                                    tunnel_id,
+                                    account,
+                                );
+                                tokio::pin!(fut);
+
+                                let result: Result<String> = loop {
+                                    terminal.draw(|f| ui::render(f, app))?;
+
+                                    if event::poll(Duration::from_millis(10))? {
+                                        if let Event::Key(k) = event::read()? {
+                                            if is_cancel_key(&k) {
+                                                break Err(anyhow::anyhow!("Cancelled"));
+                                            }
+                                        }
+                                    }
+
+                                    tokio::select! {
+                                        biased;
+                                        res = &mut fut => break res,
+                                        _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                            app.spinner.tick();
+                                        }
+                                    }
+                                };
+
+                                app.spinner.stop();
+                                match result {
+                                    Ok(name) => {
+                                        app.status_message = Some(format!("Deleted {}", name));
+                                        app.load_tunnels().await?;
+                                    }
+                                    Err(e) if e.to_string() == "Cancelled" => {
+                                        app.status_message = Some("Cancelled".to_string());
+                                    }
+                                    Err(e) => {
+                                        app.status_message = Some(format!("Error: {}", e));
+                                    }
                                 }
                             }
                         }

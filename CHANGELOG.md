@@ -1,5 +1,13 @@
 ## Changelog
 
+### v0.5.0
+
+- **Edit tunnel** - Press `e` in TUI to edit a tunnel's target URL or zone/domain without recreating it
+- **Animated spinner** - Braille dots spinner animation during async operations (create, start, stop, restart, delete)
+- **Cancel operations** - Press `Esc` or `Ctrl+C` to cancel in-progress operations
+- **Ctrl+C to quit** - Standard terminal behavior, exits the TUI cleanly
+- **Ctrl+Z to suspend** - Suspend the app and resume with `fg`
+
 ### v0.4.0
 
 - **Multi-account support** - Manage tunnels across multiple Cloudflare accounts with different API tokens

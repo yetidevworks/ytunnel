@@ -512,7 +512,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: bool) {
-    let area = centered_rect(60, 20, f.area());
+    let area = centered_rect(60, 25, f.area());
 
     // Clear the area
     f.render_widget(Clear, area);
@@ -527,25 +527,27 @@ fn render_add_dialog(f: &mut Frame, prompt: &str, input: &str, is_importing: boo
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([Constraint::Length(1), Constraint::Length(3)])
-        .split(inner);
+    // Build styled content matching zone dialog style
+    let lines = vec![
+        Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(input, Style::default().fg(Color::Green)),
+            Span::styled("_", Style::default().fg(Color::White)),
+        ]),
+    ];
 
-    let prompt_text = Paragraph::new(prompt).style(Style::default().fg(Color::Yellow));
-    f.render_widget(prompt_text, chunks[0]);
+    let text = Paragraph::new(lines)
+        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
 
-    // Render input with cursor directly (no nested block - causes rendering issues)
-    let input_text = Paragraph::new(format!("{}_", input)).style(Style::default().fg(Color::White));
-    f.render_widget(input_text, chunks[1]);
+    f.render_widget(text, area);
 }
 
 fn render_zone_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 40, f.area());
+    let area = centered_rect(60, 50, f.area());
 
     // Clear the area
     f.render_widget(Clear, area);
@@ -560,21 +562,11 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Show name and target being added
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    let info = Paragraph::new(vec![
+    // Build zone lines with selection indicator
+    let header_lines = 5; // Name, Target, empty, Select zone:, empty
+    let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::raw("Name: "),
             Span::styled(
@@ -589,32 +581,42 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
                 Style::default().fg(Color::Green),
             ),
         ]),
-    ]);
-    f.render_widget(info, chunks[0]);
+        Line::from(""),
+        Line::from(Span::styled("Select zone:", Style::default().fg(Color::Yellow))),
+        Line::from(""),
+    ];
 
-    let prompt = Paragraph::new("Select zone:").style(Style::default().fg(Color::Yellow));
-    f.render_widget(prompt, chunks[1]);
+    // Add zone options
+    for (i, zone) in app.zones.iter().enumerate() {
+        let selected = i == app.zone_selected;
+        let prefix = if selected { "> " } else { "  " };
+        let style = if selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(format!("{}{}", prefix, zone.name), style)));
+    }
 
-    let items: Vec<ListItem> = app
-        .zones
-        .iter()
-        .enumerate()
-        .map(|(i, zone)| {
-            let selected = i == app.zone_selected;
-            let style = if selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            ListItem::new(Line::from(Span::styled(zone.name.clone(), style)))
-        })
-        .collect();
+    // Calculate scroll to keep selected item visible
+    // Available height = area height - borders (2) - padding (2)
+    let available_height = area.height.saturating_sub(4) as usize;
+    let scroll = if available_height > header_lines {
+        let visible_zones = available_height - header_lines;
+        if app.zone_selected >= visible_zones {
+            (app.zone_selected - visible_zones + 1) as u16
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL));
-    f.render_widget(list, chunks[2]);
+    let content = Paragraph::new(lines)
+        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)))
+        .scroll((scroll, 0));
+
+    f.render_widget(content, area);
 }
 
 fn render_confirm_dialog(f: &mut Frame, message: &str) {

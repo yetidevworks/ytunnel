@@ -283,6 +283,13 @@ async fn delete_tunnel_op(
             // Delete from Cloudflare
             if let Some(acct) = account {
                 let client = cloudflare::Client::new(&acct.api_token);
+
+                // Delete the DNS CNAME record
+                client
+                    .delete_dns_record(&tunnel.zone_id, &tunnel.hostname)
+                    .await
+                    .ok();
+
                 client
                     .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
                     .await
@@ -995,6 +1002,13 @@ impl App {
             .get(self.selected)
             .map(|e| e.metrics_history.sparkline())
             .unwrap_or_default()
+    }
+
+    // Get the selected tunnel's details (target and hostname)
+    pub fn selected_tunnel_details(&self) -> Option<(&str, &str)> {
+        self.tunnels
+            .get(self.selected)
+            .map(|e| (e.tunnel.target.as_str(), e.tunnel.hostname.as_str()))
     }
 
     // Move selection up

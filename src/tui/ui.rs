@@ -29,18 +29,47 @@ pub fn render(f: &mut Frame, app: &App) {
     // Render tunnels list
     render_tunnels(f, app, content_chunks[0]);
 
-    // Right panel: logs and optional metrics
+    // Right panel: details (fixed), logs (flexible), and optional metrics (fixed)
     let has_metrics = app.selected_metrics().is_some();
-    if has_metrics {
+    let has_details = app.selected_tunnel_details().is_some();
+
+    if has_details && has_metrics {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(8)])
+            .constraints([
+                Constraint::Length(4), // Details panel (fixed)
+                Constraint::Min(0),    // Logs panel (flexible)
+                Constraint::Length(6), // Metrics panel (fixed)
+            ])
             .split(content_chunks[1]);
 
-        // Render logs panel
-        render_logs(f, app, right_chunks[0]);
+        render_details(f, app, right_chunks[0]);
+        render_logs(f, app, right_chunks[1]);
+        render_metrics(
+            f,
+            app.selected_metrics(),
+            &app.selected_sparkline(),
+            app.selected_health(),
+            right_chunks[2],
+        );
+    } else if has_details {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4), // Details panel (fixed)
+                Constraint::Min(0),    // Logs panel (flexible)
+            ])
+            .split(content_chunks[1]);
 
-        // Render metrics panel
+        render_details(f, app, right_chunks[0]);
+        render_logs(f, app, right_chunks[1]);
+    } else if has_metrics {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(6)])
+            .split(content_chunks[1]);
+
+        render_logs(f, app, right_chunks[0]);
         render_metrics(
             f,
             app.selected_metrics(),
@@ -350,6 +379,43 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(logs, area);
+}
+
+fn render_details(f: &mut Frame, app: &App, area: Rect) {
+    let (target, hostname) = match app.selected_tunnel_details() {
+        Some(details) => details,
+        None => return,
+    };
+
+    // Format target URL for display
+    let target_url = if target.starts_with("http://") || target.starts_with("https://") {
+        target.to_string()
+    } else {
+        format!("http://{}", target)
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Destination: ", Style::default().fg(Color::Gray)),
+            Span::styled(&target_url, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::styled("Public URL:  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("https://{}", hostname),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+    ];
+
+    let details = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Details ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+
+    f.render_widget(details, area);
 }
 
 fn render_metrics(

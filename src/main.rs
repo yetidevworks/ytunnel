@@ -795,6 +795,13 @@ async fn cmd_delete(name: String, account: Option<&str>) -> Result<()> {
     // Remove from state
     let mut state = TunnelState::load()?;
     if let Some(tunnel) = state.remove_for_account(&name, &account_name) {
+        // Delete the DNS CNAME record
+        client
+            .delete_dns_record(&tunnel.zone_id, &tunnel.hostname)
+            .await
+            .ok();
+        println!("✓ Deleted DNS record");
+
         // Delete from Cloudflare
         client
             .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)

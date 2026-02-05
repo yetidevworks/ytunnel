@@ -1,5 +1,11 @@
 ## Changelog
 
+### v0.6.0
+
+- **Tunnel details panel** - New fixed-height panel above logs shows destination URL and public hostname
+- **Fix DNS cleanup on delete** - CNAME records are now properly deleted when removing a tunnel
+- **Compact metrics panel** - Reduced metrics section height for better log visibility
+
 ### v0.5.0
 
 - **Edit tunnel** - Press `e` in TUI to edit a tunnel's target URL or zone/domain without recreating it

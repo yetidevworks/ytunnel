@@ -539,7 +539,9 @@ async fn cmd_add(
 // Start a stopped tunnel
 async fn cmd_start(name: String, account: Option<&str>) -> Result<()> {
     let cfg = config::load_config()?;
-    let account_name = cfg.get_account(account)?.name.clone();
+    let acct = cfg.get_account(account)?;
+    let account_name = acct.name.clone();
+    let client = cloudflare::Client::new(&acct.api_token);
     let mut state = TunnelState::load()?;
 
     // Get tunnel info and hostname before mutable borrow
@@ -556,6 +558,11 @@ async fn cmd_start(name: String, account: Option<&str>) -> Result<()> {
 
     // Use the tunnel's own account_name for daemon operations (handles legacy tunnels)
     let tunnel_account = &tunnel_clone.account_name;
+
+    // Ensure DNS record exists (recreates if manually deleted)
+    client
+        .ensure_dns_record(&tunnel_clone.zone_id, &hostname, &tunnel_clone.tunnel_id)
+        .await?;
 
     // Ensure config file exists
     write_tunnel_config(&tunnel_clone)?;
@@ -614,7 +621,9 @@ async fn cmd_stop(name: String, account: Option<&str>) -> Result<()> {
 // Restart a running tunnel (stop, reinstall daemon config, start)
 async fn cmd_restart(name: String, account: Option<&str>) -> Result<()> {
     let cfg = config::load_config()?;
-    let account_name = cfg.get_account(account)?.name.clone();
+    let acct = cfg.get_account(account)?;
+    let account_name = acct.name.clone();
+    let client = cloudflare::Client::new(&acct.api_token);
     let state = TunnelState::load()?;
 
     let tunnel = state
@@ -635,6 +644,11 @@ async fn cmd_restart(name: String, account: Option<&str>) -> Result<()> {
 
     // Stop the daemon
     daemon::stop_daemon(&name, tunnel_account).await.ok();
+
+    // Ensure DNS record exists (recreates if manually deleted)
+    client
+        .ensure_dns_record(&tunnel.zone_id, &tunnel.hostname, &tunnel.tunnel_id)
+        .await?;
 
     // Reinstall daemon (regenerates plist with latest config)
     write_tunnel_config(&tunnel)?;

@@ -35,6 +35,15 @@ async fn start_tunnel_op(
     account_name: String,
     tunnel: PersistentTunnel,
 ) -> Result<String> {
+    // Ensure DNS record exists (recreates if manually deleted)
+    let cfg = config::load_config()?;
+    if let Some(acct) = cfg.accounts.iter().find(|a| a.name == account_name) {
+        let client = cloudflare::Client::new(&acct.api_token);
+        client
+            .ensure_dns_record(&tunnel.zone_id, &tunnel.hostname, &tunnel.tunnel_id)
+            .await?;
+    }
+
     write_tunnel_config(&tunnel)?;
     daemon::install_daemon(&tunnel).await?;
     daemon::start_daemon(&name, &account_name).await?;
@@ -68,6 +77,16 @@ async fn restart_tunnel_op(
     tunnel: PersistentTunnel,
 ) -> Result<String> {
     daemon::stop_daemon(&name, &account_name).await.ok();
+
+    // Ensure DNS record exists (recreates if manually deleted)
+    let cfg = config::load_config()?;
+    if let Some(acct) = cfg.accounts.iter().find(|a| a.name == account_name) {
+        let client = cloudflare::Client::new(&acct.api_token);
+        client
+            .ensure_dns_record(&tunnel.zone_id, &tunnel.hostname, &tunnel.tunnel_id)
+            .await?;
+    }
+
     daemon::install_daemon(&tunnel).await?;
     daemon::start_daemon(&name, &account_name).await?;
 

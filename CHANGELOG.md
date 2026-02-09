@@ -1,5 +1,9 @@
 ## Changelog
 
+### v0.7.0
+
+- **Auto-repair DNS on start** - `start` and `restart` now ensure the CNAME DNS record exists, automatically recreating it if manually deleted
+
 ### v0.6.0
 
 - **Tunnel details panel** - New fixed-height panel above logs shows destination URL and public hostname

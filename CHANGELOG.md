@@ -1,5 +1,9 @@
 ## Changelog
 
+### v0.7.1
+
+- **Static Linux binaries** - Linux releases now use musl instead of glibc, producing fully static binaries that run on any Linux distro regardless of glibc version (fixes Raspberry Pi OS compatibility)
+
 ### v0.7.0
 
 - **Auto-repair DNS on start** - `start` and `restart` now ensure the CNAME DNS record exists, automatically recreating it if manually deleted

@@ -11,6 +11,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
+use rand::Rng;
+use std::collections::HashMap;
+
 use crate::cloudflare;
 use crate::config;
 use crate::config::Account;
@@ -573,6 +576,8 @@ pub struct App {
     pub original_hostname: Option<String>,
     // Spinner for async operations
     pub spinner: Spinner,
+    // Demo mode flag (synthetic data, no real API calls)
+    pub demo: bool,
 }
 
 // Actions that require confirmation
@@ -621,6 +626,263 @@ impl App {
             original_zone_id: None,
             original_hostname: None,
             spinner: Spinner::new(),
+            demo: false,
+        }
+    }
+
+    // Create an App pre-loaded with synthetic demo data
+    pub fn new_demo() -> Self {
+        let demo_account = Account {
+            name: "demo".to_string(),
+            api_token: String::new(),
+            account_id: String::new(),
+            default_zone_id: "zone-1".to_string(),
+            default_zone_name: "example.com".to_string(),
+            zones: vec![
+                config::ZoneConfig {
+                    id: "zone-1".to_string(),
+                    name: "example.com".to_string(),
+                },
+                config::ZoneConfig {
+                    id: "zone-2".to_string(),
+                    name: "dev.example.com".to_string(),
+                },
+            ],
+        };
+
+        Self {
+            input_mode: InputMode::Normal,
+            tunnels: Vec::new(),
+            selected: 0,
+            logs: vec!["Select a tunnel to view logs".to_string()],
+            input: String::new(),
+            new_tunnel_name: None,
+            new_tunnel_target: None,
+            zones: demo_account.zones.clone(),
+            zone_selected: 0,
+            confirm_message: None,
+            pending_action: None,
+            status_message: None,
+            should_quit: false,
+            config: None,
+            is_importing: false,
+            accounts: vec![demo_account],
+            selected_account_idx: 0,
+            editing_tunnel_name: None,
+            original_zone_id: None,
+            original_hostname: None,
+            spinner: Spinner::new(),
+            demo: true,
+        }
+    }
+
+    // Load synthetic tunnels for demo mode
+    pub fn load_demo_tunnels(&mut self) {
+        let tunnels_spec: Vec<(&str, TunnelStatus, TunnelKind, HealthStatus, bool, &str, &str)> = vec![
+            ("webapp",       TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   true,  "localhost:3000",  "example.com"),
+            ("api",          TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   true,  "localhost:8080",  "example.com"),
+            ("staging",      TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Unhealthy, false, "localhost:3001",  "dev.example.com"),
+            ("docs",         TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   false, "localhost:4000",  "example.com"),
+            ("backend",      TunnelStatus::Stopped, TunnelKind::Managed,   HealthStatus::Unknown,   false, "localhost:9000",  "example.com"),
+            ("preview-k8f2x", TunnelStatus::Running, TunnelKind::Ephemeral, HealthStatus::Unknown,  false, "localhost:5173",  "dev.example.com"),
+        ];
+
+        let mut rng = rand::rng();
+
+        for (name, status, kind, health, auto_start, target, zone_name) in tunnels_spec {
+            let hostname = format!("{}.{}", name, zone_name);
+            let tunnel = PersistentTunnel {
+                name: name.to_string(),
+                account_name: "demo".to_string(),
+                target: target.to_string(),
+                zone_id: if zone_name == "example.com" { "zone-1" } else { "zone-2" }.to_string(),
+                zone_name: zone_name.to_string(),
+                hostname,
+                tunnel_id: format!("demo-{}", name),
+                enabled: status == TunnelStatus::Running,
+                auto_start,
+                metrics_port: None,
+            };
+
+            // Build pre-seeded metrics for running managed tunnels
+            let (metrics, metrics_history) = if status == TunnelStatus::Running && kind == TunnelKind::Managed {
+                let (total, errors, concurrent, ha, codes, locations, samples) = match name {
+                    "webapp" => (
+                        12847u64, 23u64, 8u64, 4u64,
+                        vec![(200u16, 11500u64), (301, 420), (404, 85), (500, 23)],
+                        vec!["dfw08", "den01", "iad02", "lax01"],
+                        vec![45, 52, 38, 61, 55, 48, 72, 65, 43, 58, 51, 67, 44, 53, 60, 47, 56, 42, 63, 50],
+                    ),
+                    "api" => (
+                        5432, 7, 3, 4,
+                        vec![(200, 4800), (201, 320), (400, 52), (404, 30), (500, 7)],
+                        vec!["dfw08", "den01", "iad02", "lax01"],
+                        vec![20, 18, 25, 22, 15, 28, 19, 24, 17, 21, 26, 14, 23, 20, 27, 16, 22, 25, 18, 24],
+                    ),
+                    "staging" => (
+                        342, 41, 1, 2,
+                        vec![(200, 280), (404, 15), (502, 35), (503, 6)],
+                        vec!["dfw08", "den01"],
+                        vec![3, 5, 2, 4, 1, 6, 2, 3, 5, 1, 4, 2, 3, 5, 2, 4, 1, 6, 3, 2],
+                    ),
+                    "docs" => (
+                        89, 0, 0, 4,
+                        vec![(200, 82), (304, 7)],
+                        vec!["dfw08", "den01", "iad02", "lax01"],
+                        vec![1, 0, 2, 1, 0, 1, 0, 0, 1, 2, 0, 1, 0, 1, 0, 0, 1, 0, 2, 1],
+                    ),
+                    _ => (0, 0, 0, 0, vec![], vec![], vec![]),
+                };
+
+                let mut response_codes = HashMap::new();
+                for (code, count) in codes {
+                    response_codes.insert(code, count);
+                }
+
+                let m = TunnelMetrics {
+                    total_requests: total,
+                    request_errors: errors,
+                    concurrent_requests: concurrent,
+                    ha_connections: ha,
+                    response_codes,
+                    edge_locations: locations.into_iter().map(|s| s.to_string()).collect(),
+                    available: true,
+                };
+
+                let mut history = MetricsHistory {
+                    last_total: total.saturating_sub(samples.iter().sum::<u64>()),
+                    ..Default::default()
+                };
+                for &s in &samples {
+                    // Manually push samples (not using record() to avoid delta math on seeded data)
+                    history.request_samples.push(s + rng.random_range(0u64..3));
+                }
+
+                (Some(m), history)
+            } else {
+                (None, MetricsHistory::default())
+            };
+
+            self.tunnels.push(TunnelEntry {
+                tunnel,
+                status,
+                kind,
+                metrics,
+                metrics_history,
+                health,
+            });
+        }
+
+        self.refresh_demo_logs();
+    }
+
+    // Generate cloudflared-style log lines for demo tunnels
+    fn refresh_demo_logs(&mut self) {
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            match entry.kind {
+                TunnelKind::Ephemeral => {
+                    self.logs = vec![
+                        "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                        String::new(),
+                        format!("Hostname: {}", entry.tunnel.hostname),
+                        format!("Target:   {}", entry.tunnel.target),
+                        format!("Zone:     {}", entry.tunnel.zone_name),
+                        String::new(),
+                        "[demo mode] Press [m] to import as managed tunnel".to_string(),
+                        "[demo mode] Press [d] to delete from Cloudflare".to_string(),
+                    ];
+                }
+                TunnelKind::Managed => match entry.status {
+                    TunnelStatus::Running => {
+                        let name = &entry.tunnel.name;
+                        let hostname = &entry.tunnel.hostname;
+                        let target = &entry.tunnel.target;
+                        self.logs = vec![
+                            format!("INF Starting tunnel tunnelID=demo-{}", name),
+                            format!("INF Version 2024.12.2"),
+                            format!("INF ICMP proxy will use {}:0 as source for both IPv4 and IPv6", target.split(':').next().unwrap_or("localhost")),
+                            format!("INF Starting metrics server on 127.0.0.1:20241"),
+                            format!("INF Registered tunnel connection connIndex=0 connection=demo-conn-0 event=0 ip=198.41.192.77 location=dfw08 protocol=quic"),
+                            format!("INF Registered tunnel connection connIndex=1 connection=demo-conn-1 event=0 ip=198.41.200.33 location=den01 protocol=quic"),
+                            format!("INF Registered tunnel connection connIndex=2 connection=demo-conn-2 event=0 ip=198.41.200.13 location=iad02 protocol=quic"),
+                            format!("INF Registered tunnel connection connIndex=3 connection=demo-conn-3 event=0 ip=198.41.192.47 location=lax01 protocol=quic"),
+                            format!("INF Updated tunnel route dns={} tunnelID=demo-{}", hostname, name),
+                            format!("INF Connection established connIndex=0 connection=demo-conn-0 location=dfw08"),
+                            String::new(),
+                            format!("INF GET {} 200 12ms", hostname),
+                            format!("INF GET {} 200 8ms", hostname),
+                            format!("INF POST {}/api/data 201 45ms", hostname),
+                            format!("INF GET {} 200 6ms", hostname),
+                        ];
+                    }
+                    TunnelStatus::Stopped => {
+                        let name = &entry.tunnel.name;
+                        self.logs = vec![
+                            format!("INF Starting tunnel tunnelID=demo-{}", name),
+                            format!("INF Registered tunnel connection connIndex=0 location=dfw08"),
+                            format!("INF Registered tunnel connection connIndex=1 location=den01"),
+                            String::new(),
+                            format!("INF Initiating graceful shutdown due to signal"),
+                            format!("INF Quitting..."),
+                            format!("INF Unregistered tunnel connection connIndex=1"),
+                            format!("INF Unregistered tunnel connection connIndex=0"),
+                        ];
+                    }
+                    TunnelStatus::Error => {
+                        self.logs = vec![
+                            "ERR Unable to establish connection".to_string(),
+                            "ERR Retrying in 5s...".to_string(),
+                        ];
+                    }
+                },
+            }
+        } else {
+            self.logs = vec!["No tunnel selected".to_string()];
+        }
+    }
+
+    // Randomly increment demo metrics for sparkline animation
+    fn refresh_demo_metrics(&mut self) {
+        let mut rng = rand::rng();
+
+        for entry in &mut self.tunnels {
+            if entry.kind != TunnelKind::Managed || entry.status != TunnelStatus::Running {
+                continue;
+            }
+
+            if let Some(ref mut m) = entry.metrics {
+                // Increment based on tunnel traffic profile
+                let (req_delta, err_chance) = match entry.tunnel.name.as_str() {
+                    "webapp" => (rng.random_range(30u64..80), 0.02),
+                    "api"     => (rng.random_range(10u64..35), 0.01),
+                    "staging" => (rng.random_range(1u64..8),   0.15),
+                    "docs"    => (rng.random_range(0u64..3),   0.0),
+                    _         => (0, 0.0),
+                };
+
+                m.total_requests += req_delta;
+                if rng.random_range(0.0f64..1.0) < err_chance {
+                    m.request_errors += 1;
+                }
+                m.concurrent_requests = rng.random_range(0u64..=req_delta.min(12));
+
+                // Record to history for sparkline
+                entry.metrics_history.request_samples.push(req_delta);
+                if entry.metrics_history.request_samples.len() > MetricsHistory::MAX_SAMPLES {
+                    entry.metrics_history.request_samples.remove(0);
+                }
+                entry.metrics_history.last_total = m.total_requests;
+            }
+        }
+    }
+
+    // Guard for demo mode: returns true (and sets status) if in demo mode
+    fn demo_guard(&mut self) -> bool {
+        if self.demo {
+            self.status_message = Some("Demo mode — actions disabled".to_string());
+            true
+        } else {
+            false
         }
     }
 
@@ -809,6 +1071,10 @@ impl App {
 
     // Refresh logs for the selected tunnel
     pub fn refresh_logs(&mut self) {
+        if self.demo {
+            self.refresh_demo_logs();
+            return;
+        }
         if let Some(entry) = self.tunnels.get(self.selected) {
             match entry.kind {
                 TunnelKind::Managed => match daemon::read_log_tail(&entry.tunnel, 100) {
@@ -852,6 +1118,10 @@ impl App {
 
     // Refresh metrics for the selected tunnel
     pub async fn refresh_metrics(&mut self) {
+        if self.demo {
+            self.refresh_demo_metrics();
+            return;
+        }
         if let Some(entry) = self.tunnels.get_mut(self.selected) {
             if entry.kind == TunnelKind::Managed && entry.status == TunnelStatus::Running {
                 let metrics = TunnelMetrics::fetch(&entry.tunnel.metrics_url()).await;
@@ -867,11 +1137,13 @@ impl App {
 
     // Check health of the selected tunnel by making an HTTP request
     pub async fn check_health(&mut self) {
+        if self.demo { return; }
         self.check_health_for_index(self.selected).await;
     }
 
     // Check health of all running tunnels
     pub async fn check_all_health(&mut self) {
+        if self.demo { return; }
         for i in 0..self.tunnels.len() {
             if self.tunnels[i].status == TunnelStatus::Running {
                 self.check_health_for_index(i).await;
@@ -1447,6 +1719,34 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     result
 }
 
+// Run the TUI in demo mode with synthetic data (no config required)
+pub async fn run_demo_tui() -> Result<()> {
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Create demo app with fake tunnels
+    let mut app = App::new_demo();
+    app.load_demo_tunnels();
+
+    // Main loop
+    let result = run_app(&mut terminal, &mut app).await;
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
+    terminal.show_cursor()?;
+
+    result
+}
+
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -1546,12 +1846,16 @@ async fn run_app(
                             app.should_quit = true;
                         }
                         KeyCode::Char('a') => {
-                            app.start_add();
+                            if !app.demo_guard() {
+                                app.start_add();
+                            }
                         }
                         KeyCode::Char('e') => {
-                            app.start_edit();
+                            if !app.demo_guard() {
+                                app.start_edit();
+                            }
                         }
-                        KeyCode::Char('s') => {
+                        KeyCode::Char('s') => if !app.demo_guard() {
                             if let Some(entry) = app.tunnels.get(app.selected) {
                                 if entry.kind == TunnelKind::Ephemeral {
                                     app.status_message = Some(
@@ -1605,8 +1909,8 @@ async fn run_app(
                                     }
                                 }
                             }
-                        }
-                        KeyCode::Char('S') => {
+                        },
+                        KeyCode::Char('S') => if !app.demo_guard() {
                             if let Some(entry) = app.tunnels.get(app.selected) {
                                 if entry.kind == TunnelKind::Ephemeral {
                                     app.status_message = Some(
@@ -1657,16 +1961,24 @@ async fn run_app(
                                     }
                                 }
                             }
-                        }
+                        },
                         KeyCode::Char('d') => {
-                            app.request_delete();
+                            if !app.demo_guard() {
+                                app.request_delete();
+                            }
                         }
                         KeyCode::Char('m') => {
-                            if let Err(e) = app.start_import().await {
-                                app.status_message = Some(format!("Error: {}", e));
+                            if !app.demo_guard() {
+                                if let Err(e) = app.start_import().await {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
                             }
                         }
                         KeyCode::Char('r') => {
+                            if app.demo {
+                                app.refresh_demo_metrics();
+                                app.status_message = Some("Refreshed (demo)".to_string());
+                            } else {
                             // Refresh is typically quick, just show status
                             app.status_message = Some("Refreshing...".to_string());
                             terminal.draw(|f| ui::render(f, app))?;
@@ -1679,8 +1991,9 @@ async fn run_app(
                                     app.check_health().await;
                                 }
                             }
+                            }
                         }
-                        KeyCode::Char('R') => {
+                        KeyCode::Char('R') => if !app.demo_guard() {
                             if let Some(entry) = app.tunnels.get(app.selected) {
                                 if entry.kind == TunnelKind::Ephemeral {
                                     app.status_message = Some(
@@ -1733,40 +2046,54 @@ async fn run_app(
                                     }
                                 }
                             }
-                        }
+                        },
                         KeyCode::Char('c') => {
                             app.copy_url_to_clipboard();
                         }
                         KeyCode::Char('o') => {
-                            app.open_in_browser();
+                            if !app.demo_guard() {
+                                app.open_in_browser();
+                            }
                         }
                         KeyCode::Char('h') => {
-                            app.check_health().await;
+                            if !app.demo_guard() {
+                                app.check_health().await;
+                            }
                         }
                         KeyCode::Char('A') => {
-                            if let Err(e) = app.toggle_auto_start().await {
-                                app.status_message = Some(format!("Error: {}", e));
+                            if !app.demo_guard() {
+                                if let Err(e) = app.toggle_auto_start().await {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
                             }
                         }
                         KeyCode::Char('?') => {
                             app.input_mode = InputMode::Help;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if app.select_previous() && app.selected_needs_health_check() {
+                            if app.select_previous()
+                                && !app.demo
+                                && app.selected_needs_health_check()
+                            {
                                 app.check_health().await;
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if app.select_next() && app.selected_needs_health_check() {
+                            if app.select_next()
+                                && !app.demo
+                                && app.selected_needs_health_check()
+                            {
                                 app.check_health().await;
                             }
                         }
                         KeyCode::Char(';') => {
-                            // Cycle to next account
-                            if app.accounts.len() > 1 {
-                                app.next_account();
-                                if let Err(e) = app.load_tunnels().await {
-                                    app.status_message = Some(format!("Error: {}", e));
+                            if !app.demo_guard() {
+                                // Cycle to next account
+                                if app.accounts.len() > 1 {
+                                    app.next_account();
+                                    if let Err(e) = app.load_tunnels().await {
+                                        app.status_message = Some(format!("Error: {}", e));
+                                    }
                                 }
                             }
                         }

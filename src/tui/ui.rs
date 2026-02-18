@@ -249,7 +249,9 @@ fn render_help_modal(f: &mut Frame) {
 
 fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
     // Show account name in title if there are multiple accounts
-    let title = if app.accounts.len() > 1 {
+    let title = if app.demo {
+        format!(" Tunnels ({}) [demo] ", app.tunnels.len())
+    } else if app.accounts.len() > 1 {
         format!(
             " Tunnels ({}) [{}] ",
             app.tunnels.len(),
@@ -553,6 +555,9 @@ fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
 fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => {
+            if app.demo {
+                " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit".to_string()
+            } else {
             // Show different help based on whether an ephemeral tunnel is selected
             let is_ephemeral = app
                 .tunnels
@@ -574,6 +579,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 )
             } else {
                 format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+            }
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

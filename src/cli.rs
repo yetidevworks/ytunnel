@@ -115,6 +115,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<AccountCommands>,
     },
+
+    // Launch TUI with fake tunnel data for screenshots and demos (no config required)
+    Demo,
 }
 
 #[derive(Subcommand)]

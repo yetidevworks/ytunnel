@@ -72,6 +72,9 @@ async fn main() -> Result<()> {
         Some(Commands::Reset { yes }) => {
             cmd_reset(yes).await?;
         }
+        Some(Commands::Demo) => {
+            tui::run_demo_tui().await?;
+        }
         Some(Commands::Account { command }) => match command {
             None => cmd_account_list().await?,
             Some(AccountCommands::List) => cmd_account_list().await?,

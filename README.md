@@ -9,6 +9,8 @@
 
 ```
 
+![YTunnel Screenshot](ytunnel-screenshot.png)
+
 A TUI-first CLI for managing Cloudflare Tunnels with custom domains. Think ngrok, but using your own Cloudflare domain with persistent URLs and a dashboard to manage them.
 
 **Supported Platforms:** macOS and Linux

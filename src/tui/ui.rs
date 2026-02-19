@@ -556,30 +556,31 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => {
             if app.demo {
-                " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit".to_string()
+                " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
+                    .to_string()
             } else {
-            // Show different help based on whether an ephemeral tunnel is selected
-            let is_ephemeral = app
-                .tunnels
-                .get(app.selected)
-                .map(|e| e.kind == TunnelKind::Ephemeral)
-                .unwrap_or(false);
+                // Show different help based on whether an ephemeral tunnel is selected
+                let is_ephemeral = app
+                    .tunnels
+                    .get(app.selected)
+                    .map(|e| e.kind == TunnelKind::Ephemeral)
+                    .unwrap_or(false);
 
-            // Show account switching hint if multiple accounts
-            let account_hint = if app.accounts.len() > 1 {
-                " [;]account"
-            } else {
-                ""
-            };
+                // Show account switching hint if multiple accounts
+                let account_hint = if app.accounts.len() > 1 {
+                    " [;]account"
+                } else {
+                    ""
+                };
 
-            if is_ephemeral {
-                format!(
-                    " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
-                    account_hint
-                )
-            } else {
-                format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
-            }
+                if is_ephemeral {
+                    format!(
+                        " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
+                        account_hint
+                    )
+                } else {
+                    format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+                }
             }
         }
         InputMode::AddName | InputMode::AddTarget => {

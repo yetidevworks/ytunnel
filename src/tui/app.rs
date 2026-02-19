@@ -678,13 +678,69 @@ impl App {
 
     // Load synthetic tunnels for demo mode
     pub fn load_demo_tunnels(&mut self) {
-        let tunnels_spec: Vec<(&str, TunnelStatus, TunnelKind, HealthStatus, bool, &str, &str)> = vec![
-            ("webapp",       TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   true,  "localhost:3000",  "example.com"),
-            ("api",          TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   true,  "localhost:8080",  "example.com"),
-            ("staging",      TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Unhealthy, false, "localhost:3001",  "dev.example.com"),
-            ("docs",         TunnelStatus::Running, TunnelKind::Managed,   HealthStatus::Healthy,   false, "localhost:4000",  "example.com"),
-            ("backend",      TunnelStatus::Stopped, TunnelKind::Managed,   HealthStatus::Unknown,   false, "localhost:9000",  "example.com"),
-            ("preview-k8f2x", TunnelStatus::Running, TunnelKind::Ephemeral, HealthStatus::Unknown,  false, "localhost:5173",  "dev.example.com"),
+        let tunnels_spec: Vec<(
+            &str,
+            TunnelStatus,
+            TunnelKind,
+            HealthStatus,
+            bool,
+            &str,
+            &str,
+        )> = vec![
+            (
+                "webapp",
+                TunnelStatus::Running,
+                TunnelKind::Managed,
+                HealthStatus::Healthy,
+                true,
+                "localhost:3000",
+                "example.com",
+            ),
+            (
+                "api",
+                TunnelStatus::Running,
+                TunnelKind::Managed,
+                HealthStatus::Healthy,
+                true,
+                "localhost:8080",
+                "example.com",
+            ),
+            (
+                "staging",
+                TunnelStatus::Running,
+                TunnelKind::Managed,
+                HealthStatus::Unhealthy,
+                false,
+                "localhost:3001",
+                "dev.example.com",
+            ),
+            (
+                "docs",
+                TunnelStatus::Running,
+                TunnelKind::Managed,
+                HealthStatus::Healthy,
+                false,
+                "localhost:4000",
+                "example.com",
+            ),
+            (
+                "backend",
+                TunnelStatus::Stopped,
+                TunnelKind::Managed,
+                HealthStatus::Unknown,
+                false,
+                "localhost:9000",
+                "example.com",
+            ),
+            (
+                "preview-k8f2x",
+                TunnelStatus::Running,
+                TunnelKind::Ephemeral,
+                HealthStatus::Unknown,
+                false,
+                "localhost:5173",
+                "dev.example.com",
+            ),
         ];
 
         let mut rng = rand::rng();
@@ -695,7 +751,12 @@ impl App {
                 name: name.to_string(),
                 account_name: "demo".to_string(),
                 target: target.to_string(),
-                zone_id: if zone_name == "example.com" { "zone-1" } else { "zone-2" }.to_string(),
+                zone_id: if zone_name == "example.com" {
+                    "zone-1"
+                } else {
+                    "zone-2"
+                }
+                .to_string(),
                 zone_name: zone_name.to_string(),
                 hostname,
                 tunnel_id: format!("demo-{}", name),
@@ -705,63 +766,82 @@ impl App {
             };
 
             // Build pre-seeded metrics for running managed tunnels
-            let (metrics, metrics_history) = if status == TunnelStatus::Running && kind == TunnelKind::Managed {
-                let (total, errors, concurrent, ha, codes, locations, samples) = match name {
-                    "webapp" => (
-                        12847u64, 23u64, 8u64, 4u64,
-                        vec![(200u16, 11500u64), (301, 420), (404, 85), (500, 23)],
-                        vec!["dfw08", "den01", "iad02", "lax01"],
-                        vec![45, 52, 38, 61, 55, 48, 72, 65, 43, 58, 51, 67, 44, 53, 60, 47, 56, 42, 63, 50],
-                    ),
-                    "api" => (
-                        5432, 7, 3, 4,
-                        vec![(200, 4800), (201, 320), (400, 52), (404, 30), (500, 7)],
-                        vec!["dfw08", "den01", "iad02", "lax01"],
-                        vec![20, 18, 25, 22, 15, 28, 19, 24, 17, 21, 26, 14, 23, 20, 27, 16, 22, 25, 18, 24],
-                    ),
-                    "staging" => (
-                        342, 41, 1, 2,
-                        vec![(200, 280), (404, 15), (502, 35), (503, 6)],
-                        vec!["dfw08", "den01"],
-                        vec![3, 5, 2, 4, 1, 6, 2, 3, 5, 1, 4, 2, 3, 5, 2, 4, 1, 6, 3, 2],
-                    ),
-                    "docs" => (
-                        89, 0, 0, 4,
-                        vec![(200, 82), (304, 7)],
-                        vec!["dfw08", "den01", "iad02", "lax01"],
-                        vec![1, 0, 2, 1, 0, 1, 0, 0, 1, 2, 0, 1, 0, 1, 0, 0, 1, 0, 2, 1],
-                    ),
-                    _ => (0, 0, 0, 0, vec![], vec![], vec![]),
+            let (metrics, metrics_history) =
+                if status == TunnelStatus::Running && kind == TunnelKind::Managed {
+                    let (total, errors, concurrent, ha, codes, locations, samples) = match name {
+                        "webapp" => (
+                            12847u64,
+                            23u64,
+                            8u64,
+                            4u64,
+                            vec![(200u16, 11500u64), (301, 420), (404, 85), (500, 23)],
+                            vec!["dfw08", "den01", "iad02", "lax01"],
+                            vec![
+                                45, 52, 38, 61, 55, 48, 72, 65, 43, 58, 51, 67, 44, 53, 60, 47, 56,
+                                42, 63, 50,
+                            ],
+                        ),
+                        "api" => (
+                            5432,
+                            7,
+                            3,
+                            4,
+                            vec![(200, 4800), (201, 320), (400, 52), (404, 30), (500, 7)],
+                            vec!["dfw08", "den01", "iad02", "lax01"],
+                            vec![
+                                20, 18, 25, 22, 15, 28, 19, 24, 17, 21, 26, 14, 23, 20, 27, 16, 22,
+                                25, 18, 24,
+                            ],
+                        ),
+                        "staging" => (
+                            342,
+                            41,
+                            1,
+                            2,
+                            vec![(200, 280), (404, 15), (502, 35), (503, 6)],
+                            vec!["dfw08", "den01"],
+                            vec![3, 5, 2, 4, 1, 6, 2, 3, 5, 1, 4, 2, 3, 5, 2, 4, 1, 6, 3, 2],
+                        ),
+                        "docs" => (
+                            89,
+                            0,
+                            0,
+                            4,
+                            vec![(200, 82), (304, 7)],
+                            vec!["dfw08", "den01", "iad02", "lax01"],
+                            vec![1, 0, 2, 1, 0, 1, 0, 0, 1, 2, 0, 1, 0, 1, 0, 0, 1, 0, 2, 1],
+                        ),
+                        _ => (0, 0, 0, 0, vec![], vec![], vec![]),
+                    };
+
+                    let mut response_codes = HashMap::new();
+                    for (code, count) in codes {
+                        response_codes.insert(code, count);
+                    }
+
+                    let m = TunnelMetrics {
+                        total_requests: total,
+                        request_errors: errors,
+                        concurrent_requests: concurrent,
+                        ha_connections: ha,
+                        response_codes,
+                        edge_locations: locations.into_iter().map(|s| s.to_string()).collect(),
+                        available: true,
+                    };
+
+                    let mut history = MetricsHistory {
+                        last_total: total.saturating_sub(samples.iter().sum::<u64>()),
+                        ..Default::default()
+                    };
+                    for &s in &samples {
+                        // Manually push samples (not using record() to avoid delta math on seeded data)
+                        history.request_samples.push(s + rng.random_range(0u64..3));
+                    }
+
+                    (Some(m), history)
+                } else {
+                    (None, MetricsHistory::default())
                 };
-
-                let mut response_codes = HashMap::new();
-                for (code, count) in codes {
-                    response_codes.insert(code, count);
-                }
-
-                let m = TunnelMetrics {
-                    total_requests: total,
-                    request_errors: errors,
-                    concurrent_requests: concurrent,
-                    ha_connections: ha,
-                    response_codes,
-                    edge_locations: locations.into_iter().map(|s| s.to_string()).collect(),
-                    available: true,
-                };
-
-                let mut history = MetricsHistory {
-                    last_total: total.saturating_sub(samples.iter().sum::<u64>()),
-                    ..Default::default()
-                };
-                for &s in &samples {
-                    // Manually push samples (not using record() to avoid delta math on seeded data)
-                    history.request_samples.push(s + rng.random_range(0u64..3));
-                }
-
-                (Some(m), history)
-            } else {
-                (None, MetricsHistory::default())
-            };
 
             self.tunnels.push(TunnelEntry {
                 tunnel,
@@ -854,10 +934,10 @@ impl App {
                 // Increment based on tunnel traffic profile
                 let (req_delta, err_chance) = match entry.tunnel.name.as_str() {
                     "webapp" => (rng.random_range(30u64..80), 0.02),
-                    "api"     => (rng.random_range(10u64..35), 0.01),
-                    "staging" => (rng.random_range(1u64..8),   0.15),
-                    "docs"    => (rng.random_range(0u64..3),   0.0),
-                    _         => (0, 0.0),
+                    "api" => (rng.random_range(10u64..35), 0.01),
+                    "staging" => (rng.random_range(1u64..8), 0.15),
+                    "docs" => (rng.random_range(0u64..3), 0.0),
+                    _ => (0, 0.0),
                 };
 
                 m.total_requests += req_delta;
@@ -1137,13 +1217,17 @@ impl App {
 
     // Check health of the selected tunnel by making an HTTP request
     pub async fn check_health(&mut self) {
-        if self.demo { return; }
+        if self.demo {
+            return;
+        }
         self.check_health_for_index(self.selected).await;
     }
 
     // Check health of all running tunnels
     pub async fn check_all_health(&mut self) {
-        if self.demo { return; }
+        if self.demo {
+            return;
+        }
         for i in 0..self.tunnels.len() {
             if self.tunnels[i].status == TunnelStatus::Running {
                 self.check_health_for_index(i).await;
@@ -1855,113 +1939,120 @@ async fn run_app(
                                 app.start_edit();
                             }
                         }
-                        KeyCode::Char('s') => if !app.demo_guard() {
-                            if let Some(entry) = app.tunnels.get(app.selected) {
-                                if entry.kind == TunnelKind::Ephemeral {
-                                    app.status_message = Some(
+                        KeyCode::Char('s') => {
+                            if !app.demo_guard() {
+                                if let Some(entry) = app.tunnels.get(app.selected) {
+                                    if entry.kind == TunnelKind::Ephemeral {
+                                        app.status_message = Some(
                                         "Cannot start ephemeral tunnel. Import it first with 'm'."
                                             .to_string(),
                                     );
-                                } else {
-                                    let name = entry.tunnel.name.clone();
-                                    let account_name = entry.tunnel.account_name.clone();
-                                    let tunnel = entry.tunnel.clone();
+                                    } else {
+                                        let name = entry.tunnel.name.clone();
+                                        let account_name = entry.tunnel.account_name.clone();
+                                        let tunnel = entry.tunnel.clone();
 
-                                    app.spinner.start(&format!("Starting {}...", name));
+                                        app.spinner.start(&format!("Starting {}...", name));
 
-                                    // Create and pin future ONCE
-                                    let fut = start_tunnel_op(name.clone(), account_name, tunnel);
-                                    tokio::pin!(fut);
+                                        // Create and pin future ONCE
+                                        let fut =
+                                            start_tunnel_op(name.clone(), account_name, tunnel);
+                                        tokio::pin!(fut);
 
-                                    let result: Result<String> = loop {
-                                        terminal.draw(|f| ui::render(f, app))?;
+                                        let result: Result<String> = loop {
+                                            terminal.draw(|f| ui::render(f, app))?;
 
-                                        // Check for cancel (Ctrl+C or Esc)
-                                        if event::poll(Duration::from_millis(10))? {
-                                            if let Event::Key(k) = event::read()? {
-                                                if is_cancel_key(&k) {
-                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                            // Check for cancel (Ctrl+C or Esc)
+                                            if event::poll(Duration::from_millis(10))? {
+                                                if let Event::Key(k) = event::read()? {
+                                                    if is_cancel_key(&k) {
+                                                        break Err(anyhow::anyhow!("Cancelled"));
+                                                    }
                                                 }
                                             }
-                                        }
 
-                                        tokio::select! {
-                                            biased;
-                                            res = &mut fut => break res,
-                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
-                                                app.spinner.tick();
+                                            tokio::select! {
+                                                biased;
+                                                res = &mut fut => break res,
+                                                _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                    app.spinner.tick();
+                                                }
                                             }
-                                        }
-                                    };
+                                        };
 
-                                    app.spinner.stop();
-                                    match result {
-                                        Ok(name) => {
-                                            app.status_message = Some(format!("Started {}", name));
-                                            app.load_tunnels().await?;
-                                        }
-                                        Err(e) if e.to_string() == "Cancelled" => {
-                                            app.status_message = Some("Cancelled".to_string());
-                                        }
-                                        Err(e) => {
-                                            app.status_message = Some(format!("Error: {}", e));
+                                        app.spinner.stop();
+                                        match result {
+                                            Ok(name) => {
+                                                app.status_message =
+                                                    Some(format!("Started {}", name));
+                                                app.load_tunnels().await?;
+                                            }
+                                            Err(e) if e.to_string() == "Cancelled" => {
+                                                app.status_message = Some("Cancelled".to_string());
+                                            }
+                                            Err(e) => {
+                                                app.status_message = Some(format!("Error: {}", e));
+                                            }
                                         }
                                     }
                                 }
                             }
-                        },
-                        KeyCode::Char('S') => if !app.demo_guard() {
-                            if let Some(entry) = app.tunnels.get(app.selected) {
-                                if entry.kind == TunnelKind::Ephemeral {
-                                    app.status_message = Some(
+                        }
+                        KeyCode::Char('S') => {
+                            if !app.demo_guard() {
+                                if let Some(entry) = app.tunnels.get(app.selected) {
+                                    if entry.kind == TunnelKind::Ephemeral {
+                                        app.status_message = Some(
                                         "Cannot stop ephemeral tunnel from TUI. Use Ctrl+C in its terminal."
                                             .to_string(),
                                     );
-                                } else {
-                                    let name = entry.tunnel.name.clone();
-                                    let account_name = entry.tunnel.account_name.clone();
+                                    } else {
+                                        let name = entry.tunnel.name.clone();
+                                        let account_name = entry.tunnel.account_name.clone();
 
-                                    app.spinner.start(&format!("Stopping {}...", name));
+                                        app.spinner.start(&format!("Stopping {}...", name));
 
-                                    let fut = stop_tunnel_op(name.clone(), account_name);
-                                    tokio::pin!(fut);
+                                        let fut = stop_tunnel_op(name.clone(), account_name);
+                                        tokio::pin!(fut);
 
-                                    let result: Result<String> = loop {
-                                        terminal.draw(|f| ui::render(f, app))?;
+                                        let result: Result<String> = loop {
+                                            terminal.draw(|f| ui::render(f, app))?;
 
-                                        if event::poll(Duration::from_millis(10))? {
-                                            if let Event::Key(k) = event::read()? {
-                                                if is_cancel_key(&k) {
-                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                            if event::poll(Duration::from_millis(10))? {
+                                                if let Event::Key(k) = event::read()? {
+                                                    if is_cancel_key(&k) {
+                                                        break Err(anyhow::anyhow!("Cancelled"));
+                                                    }
                                                 }
                                             }
-                                        }
 
-                                        tokio::select! {
-                                            biased;
-                                            res = &mut fut => break res,
-                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
-                                                app.spinner.tick();
+                                            tokio::select! {
+                                                biased;
+                                                res = &mut fut => break res,
+                                                _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                    app.spinner.tick();
+                                                }
                                             }
-                                        }
-                                    };
+                                        };
 
-                                    app.spinner.stop();
-                                    match result {
-                                        Ok(name) => {
-                                            app.status_message = Some(format!("Stopped {}", name));
-                                            app.load_tunnels().await?;
-                                        }
-                                        Err(e) if e.to_string() == "Cancelled" => {
-                                            app.status_message = Some("Cancelled".to_string());
-                                        }
-                                        Err(e) => {
-                                            app.status_message = Some(format!("Error: {}", e));
+                                        app.spinner.stop();
+                                        match result {
+                                            Ok(name) => {
+                                                app.status_message =
+                                                    Some(format!("Stopped {}", name));
+                                                app.load_tunnels().await?;
+                                            }
+                                            Err(e) if e.to_string() == "Cancelled" => {
+                                                app.status_message = Some("Cancelled".to_string());
+                                            }
+                                            Err(e) => {
+                                                app.status_message = Some(format!("Error: {}", e));
+                                            }
                                         }
                                     }
                                 }
                             }
-                        },
+                        }
                         KeyCode::Char('d') => {
                             if !app.demo_guard() {
                                 app.request_delete();
@@ -1979,74 +2070,77 @@ async fn run_app(
                                 app.refresh_demo_metrics();
                                 app.status_message = Some("Refreshed (demo)".to_string());
                             } else {
-                            // Refresh is typically quick, just show status
-                            app.status_message = Some("Refreshing...".to_string());
-                            terminal.draw(|f| ui::render(f, app))?;
+                                // Refresh is typically quick, just show status
+                                app.status_message = Some("Refreshing...".to_string());
+                                terminal.draw(|f| ui::render(f, app))?;
 
-                            if let Err(e) = app.load_tunnels().await {
-                                app.status_message = Some(format!("Error: {}", e));
-                            } else {
-                                app.status_message = Some("Refreshed".to_string());
-                                if app.selected_needs_health_check() {
-                                    app.check_health().await;
+                                if let Err(e) = app.load_tunnels().await {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                } else {
+                                    app.status_message = Some("Refreshed".to_string());
+                                    if app.selected_needs_health_check() {
+                                        app.check_health().await;
+                                    }
                                 }
                             }
-                            }
                         }
-                        KeyCode::Char('R') => if !app.demo_guard() {
-                            if let Some(entry) = app.tunnels.get(app.selected) {
-                                if entry.kind == TunnelKind::Ephemeral {
-                                    app.status_message = Some(
+                        KeyCode::Char('R') => {
+                            if !app.demo_guard() {
+                                if let Some(entry) = app.tunnels.get(app.selected) {
+                                    if entry.kind == TunnelKind::Ephemeral {
+                                        app.status_message = Some(
                                         "Cannot restart ephemeral tunnel. Import it first with 'm'."
                                             .to_string(),
                                     );
-                                } else {
-                                    let name = entry.tunnel.name.clone();
-                                    let account_name = entry.tunnel.account_name.clone();
-                                    let tunnel = entry.tunnel.clone();
+                                    } else {
+                                        let name = entry.tunnel.name.clone();
+                                        let account_name = entry.tunnel.account_name.clone();
+                                        let tunnel = entry.tunnel.clone();
 
-                                    app.spinner.start(&format!("Restarting {}...", name));
+                                        app.spinner.start(&format!("Restarting {}...", name));
 
-                                    let fut = restart_tunnel_op(name.clone(), account_name, tunnel);
-                                    tokio::pin!(fut);
+                                        let fut =
+                                            restart_tunnel_op(name.clone(), account_name, tunnel);
+                                        tokio::pin!(fut);
 
-                                    let result: Result<String> = loop {
-                                        terminal.draw(|f| ui::render(f, app))?;
+                                        let result: Result<String> = loop {
+                                            terminal.draw(|f| ui::render(f, app))?;
 
-                                        if event::poll(Duration::from_millis(10))? {
-                                            if let Event::Key(k) = event::read()? {
-                                                if is_cancel_key(&k) {
-                                                    break Err(anyhow::anyhow!("Cancelled"));
+                                            if event::poll(Duration::from_millis(10))? {
+                                                if let Event::Key(k) = event::read()? {
+                                                    if is_cancel_key(&k) {
+                                                        break Err(anyhow::anyhow!("Cancelled"));
+                                                    }
                                                 }
                                             }
-                                        }
 
-                                        tokio::select! {
-                                            biased;
-                                            res = &mut fut => break res,
-                                            _ = tokio::time::sleep(Duration::from_millis(70)) => {
-                                                app.spinner.tick();
+                                            tokio::select! {
+                                                biased;
+                                                res = &mut fut => break res,
+                                                _ = tokio::time::sleep(Duration::from_millis(70)) => {
+                                                    app.spinner.tick();
+                                                }
                                             }
-                                        }
-                                    };
+                                        };
 
-                                    app.spinner.stop();
-                                    match result {
-                                        Ok(name) => {
-                                            app.status_message =
-                                                Some(format!("Restarted {}", name));
-                                            app.load_tunnels().await?;
-                                        }
-                                        Err(e) if e.to_string() == "Cancelled" => {
-                                            app.status_message = Some("Cancelled".to_string());
-                                        }
-                                        Err(e) => {
-                                            app.status_message = Some(format!("Error: {}", e));
+                                        app.spinner.stop();
+                                        match result {
+                                            Ok(name) => {
+                                                app.status_message =
+                                                    Some(format!("Restarted {}", name));
+                                                app.load_tunnels().await?;
+                                            }
+                                            Err(e) if e.to_string() == "Cancelled" => {
+                                                app.status_message = Some("Cancelled".to_string());
+                                            }
+                                            Err(e) => {
+                                                app.status_message = Some(format!("Error: {}", e));
+                                            }
                                         }
                                     }
                                 }
                             }
-                        },
+                        }
                         KeyCode::Char('c') => {
                             app.copy_url_to_clipboard();
                         }
@@ -2079,10 +2173,7 @@ async fn run_app(
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if app.select_next()
-                                && !app.demo
-                                && app.selected_needs_health_check()
-                            {
+                            if app.select_next() && !app.demo && app.selected_needs_health_check() {
                                 app.check_health().await;
                             }
                         }

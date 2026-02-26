@@ -118,6 +118,13 @@ pub enum Commands {
 
     // Launch TUI with fake tunnel data for screenshots and demos (no config required)
     Demo,
+
+    // Check for and install updates
+    Update {
+        // Only check, don't install
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]

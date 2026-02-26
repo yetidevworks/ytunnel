@@ -1,5 +1,11 @@
 ## Changelog
 
+### v0.8.0
+
+- **Self-update** (`ytunnel update`) — checks GitHub Releases for the latest version and replaces the binary in-place. Detects Homebrew and cargo installs and suggests the appropriate upgrade command instead
+- **Update check** (`ytunnel update --check`) — just prints whether a newer version is available, without installing
+- **Automatic update notifications** — after CLI commands, ytunnel checks a local cache (refreshed every 24 hours in the background) and prints a one-liner hint to stderr when a newer version is available
+
 ### v0.7.1
 
 - **Static Linux binaries** - Linux releases now use musl instead of glibc, producing fully static binaries that run on any Linux distro regardless of glibc version (fixes Raspberry Pi OS compatibility)

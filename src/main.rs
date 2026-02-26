@@ -6,6 +6,7 @@ mod metrics;
 mod state;
 mod tui;
 mod tunnel;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
@@ -17,6 +18,23 @@ use state::{write_tunnel_config, PersistentTunnel, TunnelState};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let account = cli.account.as_deref();
+
+    // Show update hints after CLI commands, but not TUI, demo, or update itself
+    let show_update_hint = matches!(
+        cli.command,
+        Some(Commands::Init)
+            | Some(Commands::Run { .. })
+            | Some(Commands::Add { .. })
+            | Some(Commands::Start { .. })
+            | Some(Commands::Stop { .. })
+            | Some(Commands::Restart { .. })
+            | Some(Commands::Logs { .. })
+            | Some(Commands::Zones { .. })
+            | Some(Commands::List)
+            | Some(Commands::Delete { .. })
+            | Some(Commands::Reset { .. })
+            | Some(Commands::Account { .. })
+    );
 
     match cli.command {
         None => {
@@ -82,6 +100,13 @@ async fn main() -> Result<()> {
             Some(AccountCommands::Default { name }) => cmd_account_select(name).await?,
             Some(AccountCommands::Remove { name, yes }) => cmd_account_remove(name, yes).await?,
         },
+        Some(Commands::Update { check }) => {
+            update::cmd_update(check).await?;
+        }
+    }
+
+    if show_update_hint {
+        update::maybe_print_update_hint();
     }
 
     Ok(())

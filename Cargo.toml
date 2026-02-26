@@ -1,6 +1,6 @@
 [package]
 name = "ytunnel"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "TUI-first CLI for managing Cloudflare Tunnels with custom domains"
 authors = ["YetiDevWorks"]

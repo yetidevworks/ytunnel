@@ -817,6 +817,10 @@ async fn cmd_list(account: Option<&str>) -> Result<()> {
         }
     }
 
+    // Get the local tunnels on screen before the network call, so the slow part
+    // never delays the part we already know
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
     // Ask Cloudflare what else is on the account. Without this an account with
     // hand-made tunnels, or tunnels running on another machine, looks empty.
     let client = cloudflare::Client::new(&acct.api_token);

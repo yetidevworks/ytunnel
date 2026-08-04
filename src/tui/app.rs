@@ -9,10 +9,11 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cloudflare;
 use crate::config;
@@ -22,6 +23,22 @@ use crate::metrics::TunnelMetrics;
 use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelStatus};
 
 use super::ui;
+
+// How long a Cloudflare tunnel listing stays good before we re-query. Tunnels
+// created elsewhere don't appear often, and `r` forces a refresh anyway.
+const DISCOVERY_TTL: Duration = Duration::from_secs(60);
+
+// Turn an HTTP probe result into a health verdict
+fn classify_health(result: reqwest::Result<reqwest::Response>) -> HealthStatus {
+    match result {
+        Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
+            HealthStatus::Healthy
+        }
+        Ok(resp) if resp.status().is_server_error() => HealthStatus::Unhealthy,
+        Ok(_) => HealthStatus::Healthy, // 4xx is still "reachable"
+        Err(_) => HealthStatus::Unhealthy,
+    }
+}
 
 // Check if a key event is a cancel key (Esc or Ctrl+C)
 fn is_cancel_key(key: &crossterm::event::KeyEvent) -> bool {
@@ -630,6 +647,22 @@ pub struct App {
     pub spinner: Spinner,
     // Demo mode flag (synthetic data, no real API calls)
     pub demo: bool,
+    // What Cloudflare last told us was on each account, keyed by account name.
+    // Cached so a reload never waits on the network to draw the local tunnels.
+    discovered: HashMap<String, Vec<cloudflare::Tunnel>>,
+    // When each account's discovery last completed
+    discovery_at: HashMap<String, Instant>,
+    // Accounts with a discovery request currently running
+    discovery_in_flight: HashSet<String>,
+    // Background discovery results arrive here
+    discovery_tx: mpsc::UnboundedSender<DiscoveryResult>,
+    discovery_rx: mpsc::UnboundedReceiver<DiscoveryResult>,
+}
+
+// Outcome of one background query to Cloudflare for an account's tunnels
+struct DiscoveryResult {
+    account_name: String,
+    tunnels: Result<Vec<cloudflare::Tunnel>>,
 }
 
 // Actions that require confirmation
@@ -656,6 +689,8 @@ impl App {
             (None, Vec::new(), 0)
         };
 
+        let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
+
         Self {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
@@ -679,6 +714,11 @@ impl App {
             original_hostname: None,
             spinner: Spinner::new(),
             demo: false,
+            discovered: HashMap::new(),
+            discovery_at: HashMap::new(),
+            discovery_in_flight: HashSet::new(),
+            discovery_tx,
+            discovery_rx,
         }
     }
 
@@ -701,6 +741,8 @@ impl App {
                 },
             ],
         };
+
+        let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
 
         Self {
             input_mode: InputMode::Normal,
@@ -725,6 +767,11 @@ impl App {
             original_hostname: None,
             spinner: Spinner::new(),
             demo: true,
+            discovered: HashMap::new(),
+            discovery_at: HashMap::new(),
+            discovery_in_flight: HashSet::new(),
+            discovery_tx,
+            discovery_rx,
         }
     }
 
@@ -1065,9 +1112,18 @@ impl App {
         }
     }
 
-    // Switch to the previous account
-    // Load tunnels and their statuses
+    // Load tunnels and their statuses from local state. Cloudflare discovery
+    // runs in the background, so this never blocks on the network.
     pub async fn load_tunnels(&mut self) -> Result<()> {
+        self.load_tunnels_inner(false).await
+    }
+
+    // Same, but always re-query Cloudflare even if the cache is still fresh
+    pub async fn reload_tunnels(&mut self) -> Result<()> {
+        self.load_tunnels_inner(true).await
+    }
+
+    async fn load_tunnels_inner(&mut self, force: bool) -> Result<()> {
         // Load config
         self.config = config::load_config().ok();
         if let Some(ref cfg) = self.config {
@@ -1137,114 +1193,9 @@ impl App {
             });
         }
 
-        // Query Cloudflare for everything else on the account: ephemeral tunnels
-        // (ytunnel-* not in state) and tunnels ytunnel didn't create at all
-        if let Some(acct) = self.current_account() {
-            let client = cloudflare::Client::new(&acct.api_token);
-            if let Ok(cf_tunnels) = client.list_tunnels(&acct.account_id).await {
-                for cf_tunnel in cf_tunnels {
-                    // Skip deleted tunnels
-                    if cf_tunnel.deleted_at.is_some() {
-                        continue;
-                    }
-
-                    // Skip anything we're already showing as managed
-                    if managed_ids.contains(&cf_tunnel.id) {
-                        continue;
-                    }
-
-                    let short_name = cf_tunnel.name.strip_prefix("ytunnel-");
-
-                    // Anything without the ytunnel- prefix was created outside of
-                    // ytunnel, so we have no local config, credentials, or daemon
-                    // for it. Show it read-only rather than pretending it isn't there.
-                    let Some(short_name) = short_name else {
-                        entries.push(TunnelEntry {
-                            tunnel: PersistentTunnel {
-                                name: cf_tunnel.name.clone(),
-                                account_name: current_account_name.clone(),
-                                target: String::new(),
-                                zone_id: String::new(),
-                                zone_name: String::new(),
-                                hostname: String::new(),
-                                tunnel_id: cf_tunnel.id.clone(),
-                                enabled: false,
-                                auto_start: false,
-                                metrics_port: None,
-                            },
-                            // Cloudflare's own view is the only status we have
-                            status: if cf_tunnel.is_connected() {
-                                TunnelStatus::Running
-                            } else {
-                                TunnelStatus::Stopped
-                            },
-                            kind: TunnelKind::External,
-                            metrics: None,
-                            metrics_history: MetricsHistory::default(),
-                            health: HealthStatus::Unknown,
-                            cf_status: Some(cf_tunnel.status_label().to_string()),
-                        });
-                        continue;
-                    };
-
-                    // Skip if already managed under its short name
-                    if managed_names.contains(short_name) {
-                        continue;
-                    }
-
-                    // This is an ephemeral tunnel - try to read its config file
-                    let (hostname, target) = parse_ephemeral_config(&cf_tunnel.id)
-                        .unwrap_or_else(|| (short_name.to_string(), "unknown".to_string()));
-
-                    // Try to determine the zone from the hostname
-                    let (zone_id, zone_name) = if hostname.contains('.') {
-                        // Try to match hostname to a known zone
-                        acct.zones
-                            .iter()
-                            .find(|z| hostname.ends_with(&z.name))
-                            .map(|z| (z.id.clone(), z.name.clone()))
-                            .unwrap_or_default()
-                    } else {
-                        (String::new(), String::new())
-                    };
-
-                    let ephemeral = PersistentTunnel {
-                        name: short_name.to_string(),
-                        account_name: current_account_name.clone(),
-                        target,
-                        zone_id,
-                        zone_name,
-                        hostname,
-                        tunnel_id: cf_tunnel.id.clone(),
-                        enabled: false,
-                        auto_start: false,
-                        metrics_port: None,
-                    };
-
-                    // Check if config file exists (means tunnel is actively running)
-                    let config_dir = crate::config::config_dir().ok();
-                    let config_exists = config_dir
-                        .map(|d| d.join(format!("tunnel-{}.yml", cf_tunnel.id)).exists())
-                        .unwrap_or(false);
-
-                    let status = if config_exists {
-                        TunnelStatus::Running
-                    } else {
-                        TunnelStatus::Stopped
-                    };
-
-                    entries.push(TunnelEntry {
-                        tunnel: ephemeral,
-                        status,
-                        kind: TunnelKind::Ephemeral,
-                        metrics: None,
-                        metrics_history: MetricsHistory::default(),
-                        health: HealthStatus::Unknown,
-                        cf_status: None,
-                    });
-                }
-            }
-        }
+        // Append whatever Cloudflare last told us about, from cache. The API
+        // call itself runs in the background so it never delays this render.
+        entries.extend(self.derive_discovered(&current_account_name, &managed_names, &managed_ids));
 
         self.tunnels = entries;
 
@@ -1256,7 +1207,226 @@ impl App {
         // Load logs for selected tunnel
         self.refresh_logs();
 
+        self.spawn_discovery(force);
+
         Ok(())
+    }
+
+    // Turn cached Cloudflare results into entries for tunnels we aren't already
+    // showing: ephemeral ones (ytunnel-* with no state) and everything else,
+    // which ytunnel didn't create at all
+    fn derive_discovered(
+        &self,
+        account_name: &str,
+        managed_names: &HashSet<String>,
+        managed_ids: &HashSet<String>,
+    ) -> Vec<TunnelEntry> {
+        let Some(cf_tunnels) = self.discovered.get(account_name) else {
+            return Vec::new();
+        };
+        let zones = self
+            .current_account()
+            .map(|a| a.zones.clone())
+            .unwrap_or_default();
+
+        let mut entries = Vec::new();
+        for cf_tunnel in cf_tunnels {
+            // Skip deleted tunnels and anything already shown as managed
+            if cf_tunnel.deleted_at.is_some() || managed_ids.contains(&cf_tunnel.id) {
+                continue;
+            }
+
+            // Anything without the ytunnel- prefix was created outside of
+            // ytunnel, so we have no local config, credentials, or daemon for
+            // it. Show it read-only rather than pretending it isn't there.
+            let Some(short_name) = cf_tunnel.name.strip_prefix("ytunnel-") else {
+                entries.push(TunnelEntry {
+                    tunnel: PersistentTunnel {
+                        name: cf_tunnel.name.clone(),
+                        account_name: account_name.to_string(),
+                        target: String::new(),
+                        zone_id: String::new(),
+                        zone_name: String::new(),
+                        hostname: String::new(),
+                        tunnel_id: cf_tunnel.id.clone(),
+                        enabled: false,
+                        auto_start: false,
+                        metrics_port: None,
+                    },
+                    // Cloudflare's own view is the only status we have
+                    status: if cf_tunnel.is_connected() {
+                        TunnelStatus::Running
+                    } else {
+                        TunnelStatus::Stopped
+                    },
+                    kind: TunnelKind::External,
+                    metrics: None,
+                    metrics_history: MetricsHistory::default(),
+                    health: HealthStatus::Unknown,
+                    cf_status: Some(cf_tunnel.status_label().to_string()),
+                });
+                continue;
+            };
+
+            // Skip if already managed under its short name
+            if managed_names.contains(short_name) {
+                continue;
+            }
+
+            // This is an ephemeral tunnel - try to read its config file
+            let (hostname, target) = parse_ephemeral_config(&cf_tunnel.id)
+                .unwrap_or_else(|| (short_name.to_string(), "unknown".to_string()));
+
+            // Try to determine the zone from the hostname
+            let (zone_id, zone_name) = if hostname.contains('.') {
+                zones
+                    .iter()
+                    .find(|z| hostname.ends_with(&z.name))
+                    .map(|z| (z.id.clone(), z.name.clone()))
+                    .unwrap_or_default()
+            } else {
+                (String::new(), String::new())
+            };
+
+            // Check if config file exists (means tunnel is actively running)
+            let config_exists = crate::config::config_dir()
+                .ok()
+                .map(|d| d.join(format!("tunnel-{}.yml", cf_tunnel.id)).exists())
+                .unwrap_or(false);
+
+            entries.push(TunnelEntry {
+                tunnel: PersistentTunnel {
+                    name: short_name.to_string(),
+                    account_name: account_name.to_string(),
+                    target,
+                    zone_id,
+                    zone_name,
+                    hostname,
+                    tunnel_id: cf_tunnel.id.clone(),
+                    enabled: false,
+                    auto_start: false,
+                    metrics_port: None,
+                },
+                status: if config_exists {
+                    TunnelStatus::Running
+                } else {
+                    TunnelStatus::Stopped
+                },
+                kind: TunnelKind::Ephemeral,
+                metrics: None,
+                metrics_history: MetricsHistory::default(),
+                health: HealthStatus::Unknown,
+                cf_status: None,
+            });
+        }
+
+        entries
+    }
+
+    // Kick off a background query to Cloudflare for the current account unless
+    // one is already running or the cached result is still fresh
+    fn spawn_discovery(&mut self, force: bool) {
+        if self.demo {
+            return;
+        }
+
+        let Some(acct) = self.current_account().cloned() else {
+            return;
+        };
+
+        if self.discovery_in_flight.contains(&acct.name) {
+            return;
+        }
+
+        if !force {
+            let fresh = self
+                .discovery_at
+                .get(&acct.name)
+                .map(|t| t.elapsed() < DISCOVERY_TTL)
+                .unwrap_or(false);
+            if fresh {
+                return;
+            }
+        }
+
+        self.discovery_in_flight.insert(acct.name.clone());
+        let tx = self.discovery_tx.clone();
+
+        tokio::spawn(async move {
+            let client = cloudflare::Client::new(&acct.api_token);
+            let tunnels = client.list_tunnels(&acct.account_id).await;
+            // A send failure just means the TUI exited first
+            tx.send(DiscoveryResult {
+                account_name: acct.name,
+                tunnels,
+            })
+            .ok();
+        });
+    }
+
+    // Drain any finished background discoveries. Returns true if the tunnel
+    // list changed and the UI should redraw.
+    pub fn poll_discovery(&mut self) -> bool {
+        let mut changed = false;
+
+        while let Ok(result) = self.discovery_rx.try_recv() {
+            self.discovery_in_flight.remove(&result.account_name);
+
+            match result.tunnels {
+                Ok(tunnels) => {
+                    self.discovery_at
+                        .insert(result.account_name.clone(), Instant::now());
+                    self.discovered.insert(result.account_name, tunnels);
+                    changed = true;
+                }
+                Err(e) => {
+                    // Keep any previous result rather than blanking the list
+                    self.status_message =
+                        Some(format!("Could not reach Cloudflare to list tunnels: {}", e));
+                }
+            }
+        }
+
+        if changed {
+            self.rebuild_discovered_entries();
+        }
+
+        changed
+    }
+
+    // Swap the non-managed entries for freshly derived ones, leaving managed
+    // tunnels (and their metrics history) untouched
+    fn rebuild_discovered_entries(&mut self) {
+        let account_name = self.current_account_name().to_string();
+        let selected_name = self
+            .tunnels
+            .get(self.selected)
+            .map(|e| e.tunnel.name.clone());
+
+        self.tunnels.retain(|e| e.kind.is_managed());
+
+        let managed_names: HashSet<String> =
+            self.tunnels.iter().map(|e| e.tunnel.name.clone()).collect();
+        let managed_ids: HashSet<String> = self
+            .tunnels
+            .iter()
+            .map(|e| e.tunnel.tunnel_id.clone())
+            .collect();
+
+        let discovered = self.derive_discovered(&account_name, &managed_names, &managed_ids);
+        self.tunnels.extend(discovered);
+
+        // Keep the cursor on whatever the user had selected
+        if let Some(name) = selected_name {
+            if let Some(pos) = self.tunnels.iter().position(|e| e.tunnel.name == name) {
+                self.selected = pos;
+            }
+        }
+        if self.selected >= self.tunnels.len() && !self.tunnels.is_empty() {
+            self.selected = self.tunnels.len() - 1;
+        }
+
+        self.refresh_logs();
     }
 
     // Refresh logs for the selected tunnel
@@ -1336,17 +1506,55 @@ impl App {
         self.check_health_for_index(self.selected).await;
     }
 
-    // Check health of all running tunnels
+    // Check health of all running tunnels. Probes run concurrently: done one at
+    // a time this cost a round trip per tunnel and froze the UI for the total.
     pub async fn check_all_health(&mut self) {
         if self.demo {
             return;
         }
-        for i in 0..self.tunnels.len() {
-            if self.tunnels[i].status == TunnelStatus::Running
-                && !self.tunnels[i].tunnel.hostname.is_empty()
-            {
-                self.check_health_for_index(i).await;
-            }
+
+        // (index, hostname, health before the check)
+        let targets: Vec<(usize, String, HealthStatus)> = self
+            .tunnels
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.status == TunnelStatus::Running && !e.tunnel.hostname.is_empty())
+            .map(|(i, e)| (i, e.tunnel.hostname.clone(), e.health))
+            .collect();
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .danger_accept_invalid_certs(true) // In case of self-signed certs
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let mut handles = Vec::new();
+        for (index, hostname, _) in &targets {
+            let client = client.clone();
+            let url = format!("https://{}", hostname);
+            let index = *index;
+            handles.push(tokio::spawn(async move {
+                (index, classify_health(client.head(&url).send().await))
+            }));
+        }
+
+        for (handle, (_, _, previous)) in handles.into_iter().zip(targets.iter()) {
+            let Ok((index, health)) = handle.await else {
+                continue;
+            };
+            let Some(entry) = self.tunnels.get_mut(index) else {
+                continue;
+            };
+            entry.health = health;
+            let name = entry.tunnel.name.clone();
+            self.show_health_result(&name, *previous, health);
         }
     }
 
@@ -1399,14 +1607,7 @@ impl App {
                 }
             };
 
-            let new_health = match result {
-                Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
-                    HealthStatus::Healthy
-                }
-                Ok(resp) if resp.status().is_server_error() => HealthStatus::Unhealthy,
-                Ok(_) => HealthStatus::Healthy, // 4xx is still "reachable"
-                Err(_) => HealthStatus::Unhealthy,
-            };
+            let new_health = classify_health(result);
 
             if let Some(entry) = self.tunnels.get_mut(index) {
                 entry.health = new_health;
@@ -1934,8 +2135,8 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
         app.status_message = Some(format!("Error loading tunnels: {}", e));
     }
 
-    // Initial health check for all running tunnels
-    app.check_all_health().await;
+    // The initial health check runs on the loop's first tick instead of here,
+    // so the tunnel list paints before we start probing hostnames
 
     // Main loop
     let result = run_app(&mut terminal, &mut app).await;
@@ -1985,12 +2186,18 @@ async fn run_app(
     app: &mut App,
 ) -> Result<()> {
     let mut last_metrics_refresh = std::time::Instant::now();
-    let mut last_health_check = std::time::Instant::now();
     let metrics_refresh_interval = Duration::from_secs(5);
     let health_check_interval = Duration::from_secs(30);
+    // Backdated so the first health check fires immediately after the first draw
+    let mut last_health_check = std::time::Instant::now()
+        .checked_sub(health_check_interval)
+        .unwrap_or_else(std::time::Instant::now);
 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
+
+        // Fold in any background Cloudflare discovery that finished
+        app.poll_discovery();
 
         // Tick spinner animation
         app.spinner.tick();
@@ -2223,7 +2430,8 @@ async fn run_app(
                                 app.status_message = Some("Refreshing...".to_string());
                                 terminal.draw(|f| ui::render(f, app))?;
 
-                                if let Err(e) = app.load_tunnels().await {
+                                // Explicit refresh re-queries Cloudflare too
+                                if let Err(e) = app.reload_tunnels().await {
                                     app.status_message = Some(format!("Error: {}", e));
                                 } else {
                                     app.status_message = Some("Refreshed".to_string());
@@ -2718,7 +2926,9 @@ async fn run_app(
                                 match result {
                                     Ok(name) => {
                                         app.status_message = Some(format!("Deleted {}", name));
-                                        app.load_tunnels().await?;
+                                        // Deleting removes it from Cloudflare too, so the
+                                        // cached listing is stale
+                                        app.reload_tunnels().await?;
                                     }
                                     Err(e) if e.to_string() == "Cancelled" => {
                                         app.status_message = Some("Cancelled".to_string());

@@ -47,7 +47,7 @@ pub struct FlatZone {
     pub account_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Tunnel {
     pub id: String,
     pub name: String,

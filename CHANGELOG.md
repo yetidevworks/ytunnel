@@ -6,6 +6,8 @@
 - **Cloudflare-reported status for unmanaged tunnels** - Shows `healthy` / `degraded` / `down` / `inactive` straight from the API, since there's no local process to inspect
 - **Clearer refusals** - Start, stop, restart, edit, auto-start, import, and delete now explain why they don't apply to an unmanaged tunnel instead of silently doing nothing
 - **Fix `list` reporting an empty account** - It printed "No tunnels configured" for accounts that had tunnels, as long as ytunnel hadn't created them
+- **Background tunnel discovery** - The TUI draws local tunnels immediately and folds in the Cloudflare listing when it arrives, so the API call never delays startup. Results are cached for 60 seconds; `r` forces a re-query
+- **Concurrent health checks** - Health probes now run in parallel instead of one tunnel at a time, and the first check happens after the initial render rather than before it
 
 ### v0.8.0
 

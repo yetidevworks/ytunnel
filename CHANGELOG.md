@@ -1,5 +1,12 @@
 ## Changelog
 
+### v0.9.0
+
+- **Show tunnels ytunnel didn't create** - `ytunnel list` and the TUI now query Cloudflare and list every tunnel on the account, not just the ones in local state. Tunnels created in the dashboard, by hand with `cloudflared`, or running on another machine appear marked `[not managed by ytunnel]` instead of being silently omitted
+- **Cloudflare-reported status for unmanaged tunnels** - Shows `healthy` / `degraded` / `down` / `inactive` straight from the API, since there's no local process to inspect
+- **Clearer refusals** - Start, stop, restart, edit, auto-start, import, and delete now explain why they don't apply to an unmanaged tunnel instead of silently doing nothing
+- **Fix `list` reporting an empty account** - It printed "No tunnels configured" for accounts that had tunnels, as long as ytunnel hadn't created them
+
 ### v0.8.0
 
 - **Self-update** (`ytunnel update`) — checks GitHub Releases for the latest version and replaces the binary in-place. Detects Homebrew and cargo installs and suggests the appropriate upgrade command instead

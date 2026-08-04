@@ -280,7 +280,7 @@ impl Client {
         hostname: &str,
         tunnel_id: &str,
     ) -> Result<()> {
-        let tunnel_cname = format!("{}.cfargotunnel.com", tunnel_id);
+        let tunnel_cname = tunnel_cname(tunnel_id);
 
         // Check if record exists
         let existing = self.get_dns_record(zone_id, hostname).await?;
@@ -397,35 +397,164 @@ impl Client {
         Ok(())
     }
 
-    // Delete a DNS record by hostname
-    pub async fn delete_dns_record(&self, zone_id: &str, hostname: &str) -> Result<()> {
-        // First find the record
-        let record = self.get_dns_record(zone_id, hostname).await?;
+    // Every CNAME ytunnel creates points at <tunnel_id>.cfargotunnel.com, so we
+    // can find a tunnel's records without knowing its hostname or zone
+    pub async fn find_dns_records_for_tunnel(
+        &self,
+        zone_id: &str,
+        tunnel_id: &str,
+    ) -> Result<Vec<DnsRecord>> {
+        let content = tunnel_cname(tunnel_id);
+        let url = format!(
+            "{}/zones/{}/dns_records?type=CNAME&content={}&per_page=100",
+            API_BASE, zone_id, content
+        );
+        let resp: ApiResponse<Vec<DnsRecord>> = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("Failed to fetch DNS records")?
+            .json()
+            .await
+            .context("Failed to parse DNS records response")?;
 
-        if let Some(record) = record {
-            let url = format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, record.id);
+        if !resp.success {
+            anyhow::bail!(
+                "Failed to fetch DNS records: {}",
+                format_errors(&resp.errors)
+            );
+        }
 
-            let resp: ApiResponse<serde_json::Value> = self
-                .http
-                .delete(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await
-                .context("Failed to delete DNS record")?
-                .json()
-                .await
-                .context("Failed to parse delete DNS record response")?;
+        // Filter again locally in case the API widens the content match
+        Ok(resp
+            .result
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.content == content)
+            .collect())
+    }
 
-            if !resp.success {
-                anyhow::bail!(
-                    "Failed to delete DNS record: {}",
-                    format_errors(&resp.errors)
-                );
-            }
+    // Every CNAME in a zone that points into cfargotunnel.com, whether or not
+    // the tunnel behind it still exists
+    pub async fn list_tunnel_dns_records(&self, zone_id: &str) -> Result<Vec<DnsRecord>> {
+        let url = format!(
+            "{}/zones/{}/dns_records?type=CNAME&per_page=500",
+            API_BASE, zone_id
+        );
+        let resp: ApiResponse<Vec<DnsRecord>> = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("Failed to fetch DNS records")?
+            .json()
+            .await
+            .context("Failed to parse DNS records response")?;
+
+        if !resp.success {
+            anyhow::bail!(
+                "Failed to fetch DNS records: {}",
+                format_errors(&resp.errors)
+            );
+        }
+
+        Ok(resp
+            .result
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.content.ends_with(".cfargotunnel.com"))
+            .collect())
+    }
+
+    pub async fn delete_dns_record_by_id(&self, zone_id: &str, record_id: &str) -> Result<()> {
+        let url = format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, record_id);
+        let resp: ApiResponse<serde_json::Value> = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("Failed to delete DNS record")?
+            .json()
+            .await
+            .context("Failed to parse delete DNS record response")?;
+
+        if !resp.success {
+            anyhow::bail!(
+                "Failed to delete DNS record: {}",
+                format_errors(&resp.errors)
+            );
         }
 
         Ok(())
     }
+
+    // Remove every CNAME across the account's zones that points at this tunnel.
+    // Matching on record content rather than a remembered hostname means this
+    // still works when the local config is gone or the zone has since changed.
+    pub async fn delete_tunnel_dns_records(
+        &self,
+        zones: &[crate::config::ZoneConfig],
+        tunnel_id: &str,
+    ) -> DnsCleanup {
+        let mut cleanup = DnsCleanup::default();
+
+        for zone in zones {
+            let records = match self.find_dns_records_for_tunnel(&zone.id, tunnel_id).await {
+                Ok(records) => records,
+                Err(e) => {
+                    cleanup.errors.push(format!("{}: {}", zone.name, e));
+                    continue;
+                }
+            };
+
+            for record in records {
+                match self.delete_dns_record_by_id(&zone.id, &record.id).await {
+                    Ok(()) => cleanup.removed.push(record.name),
+                    Err(e) => cleanup.errors.push(format!("{}: {}", record.name, e)),
+                }
+            }
+        }
+
+        cleanup
+    }
+}
+
+// What a DNS cleanup actually managed to do. Callers report both halves rather
+// than printing a checkmark and hoping.
+#[derive(Debug, Default)]
+pub struct DnsCleanup {
+    pub removed: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl DnsCleanup {
+    // A one-line summary for CLI output, or None if there was nothing to do
+    pub fn summary(&self) -> Option<String> {
+        if !self.errors.is_empty() {
+            return Some(format!(
+                "✗ Could not remove {}: {}",
+                if self.removed.is_empty() {
+                    "the DNS record"
+                } else {
+                    "every DNS record"
+                },
+                self.errors.join("; ")
+            ));
+        }
+        if self.removed.is_empty() {
+            return None;
+        }
+        Some(format!("✓ Deleted DNS record: {}", self.removed.join(", ")))
+    }
+}
+
+// The CNAME target for a tunnel
+pub fn tunnel_cname(tunnel_id: &str) -> String {
+    format!("{}.cfargotunnel.com", tunnel_id)
 }
 
 fn base64_encode(data: &[u8]) -> String {

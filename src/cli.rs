@@ -103,6 +103,21 @@ pub enum Commands {
         name: String,
     },
 
+    // Check for leftovers ytunnel should have cleaned up
+    Doctor {
+        // Remove what it finds instead of just reporting it
+        #[arg(long)]
+        fix: bool,
+
+        // Skip the confirmation prompt when using --fix
+        #[arg(short, long)]
+        yes: bool,
+
+        // Check every configured account, not just the selected one
+        #[arg(short, long)]
+        all: bool,
+    },
+
     // Reset ytunnel configuration (allows re-initializing with new credentials)
     Reset {
         // Skip confirmation prompt

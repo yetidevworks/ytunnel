@@ -1,5 +1,12 @@
 ## Changelog
 
+### v0.10.0
+
+- **`ytunnel doctor`** - New command that reports leftovers: DNS records still pointing at deleted tunnels, and local state entries whose Cloudflare tunnel is gone. `--fix` removes them (with a prompt), `--all` checks every configured account
+- **Fix DNS records surviving tunnel deletion** - Deleting an ephemeral tunnel, from the TUI or via `ytunnel delete`, removed the tunnel but left its CNAME behind. `ytunnel run` creates a DNS record, so any run that was killed rather than stopped cleanly left one stranded
+- **Match DNS records by tunnel, not by hostname** - Cleanup now finds records by what they point at (`<tunnel-id>.cfargotunnel.com`) instead of a hostname remembered in local state. This works when the local config is gone, when the zone has changed, and when state has drifted
+- **Report DNS cleanup honestly** - `ytunnel delete` printed `✓ Deleted DNS record` whether or not the delete succeeded, and the TUI swallowed the error entirely. Failures are now reported, and deletion stops rather than orphaning the record
+
 ### v0.9.0
 
 - **Show tunnels ytunnel didn't create** - `ytunnel list` and the TUI now query Cloudflare and list every tunnel on the account, not just the ones in local state. Tunnels created in the dashboard, by hand with `cloudflared`, or running on another machine appear marked `[not managed by ytunnel]` instead of being silently omitted

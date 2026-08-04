@@ -254,11 +254,18 @@ async fn edit_tunnel_op(
 
     // If zone changed, handle DNS records
     if zone_changed {
-        // Delete old DNS record
-        client
-            .delete_dns_record(&original_zone_id, &original_hostname)
-            .await
-            .ok(); // Log but continue
+        // Clear every record pointing at this tunnel before pointing the new
+        // hostname at it, so moving zones can't strand the old CNAME
+        let cleanup = client
+            .delete_tunnel_dns_records(&account.zones, &tunnel_id)
+            .await;
+        if !cleanup.errors.is_empty() {
+            anyhow::bail!(
+                "Could not remove the old DNS record for {}: {}",
+                original_hostname,
+                cleanup.errors.join("; ")
+            );
+        }
 
         // Create new DNS record
         client
@@ -301,9 +308,14 @@ async fn delete_tunnel_op(
     account: Option<Account>,
 ) -> Result<String> {
     if is_ephemeral {
-        // Ephemeral tunnel: just delete from Cloudflare
+        // Ephemeral tunnel: remove it from Cloudflare along with the CNAME that
+        // `ytunnel run` created for it
         if let (Some(acct), Some(tid)) = (account, tunnel_id) {
             let client = cloudflare::Client::new(&acct.api_token);
+            let cleanup = client.delete_tunnel_dns_records(&acct.zones, &tid).await;
+            if !cleanup.errors.is_empty() {
+                anyhow::bail!("{}", cleanup.errors.join("; "));
+            }
             client.delete_tunnel(&acct.account_id, &tid).await.ok();
 
             // Remove credentials file if it exists
@@ -323,11 +335,14 @@ async fn delete_tunnel_op(
             if let Some(acct) = account {
                 let client = cloudflare::Client::new(&acct.api_token);
 
-                // Delete the DNS CNAME record
-                client
-                    .delete_dns_record(&tunnel.zone_id, &tunnel.hostname)
-                    .await
-                    .ok();
+                // Delete the DNS CNAME records, matched by what they point at
+                // rather than a stored hostname that may be stale
+                let cleanup = client
+                    .delete_tunnel_dns_records(&acct.zones, &tunnel.tunnel_id)
+                    .await;
+                if !cleanup.errors.is_empty() {
+                    anyhow::bail!("{}", cleanup.errors.join("; "));
+                }
 
                 client
                     .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)

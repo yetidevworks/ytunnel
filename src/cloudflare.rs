@@ -47,11 +47,27 @@ pub struct FlatZone {
     pub account_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Tunnel {
     pub id: String,
     pub name: String,
     pub deleted_at: Option<String>,
+    // Connection status as reported by Cloudflare: healthy, degraded, down, inactive.
+    // This is the only status signal available for tunnels running on another machine.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl Tunnel {
+    // Whether Cloudflare currently sees connections for this tunnel
+    pub fn is_connected(&self) -> bool {
+        matches!(self.status.as_deref(), Some("healthy") | Some("degraded"))
+    }
+
+    // Human-readable status for display, falling back when the API omits it
+    pub fn status_label(&self) -> &str {
+        self.status.as_deref().unwrap_or("unknown")
+    }
 }
 
 pub struct TunnelWithCredentials {

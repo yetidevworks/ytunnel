@@ -242,6 +242,14 @@ When a tunnel goes down or comes back up, ytunnel sends a system notification. T
 - Delete them from Cloudflare
 - Import them as managed tunnels (press `m`) to add daemon control
 
+### Tunnels ytunnel Didn't Create
+
+Any other tunnel on your Cloudflare account shows up marked `[not managed by ytunnel]`, in both `ytunnel list` and the TUI. This covers tunnels you made in the Cloudflare dashboard or by hand with `cloudflared`, including ones whose `cloudflared` runs on a completely different machine.
+
+These are **read-only**. ytunnel has no local config, credentials, or daemon for them, so it can't start, stop, edit, import, or delete them. The status shown comes from Cloudflare (`healthy` / `degraded` / `down` / `inactive`), not from this machine, and the destination and hostname read as unknown because that config lives wherever `cloudflared` is actually running.
+
+> **Note:** ytunnel manages `cloudflared` processes on the machine it runs on. It is not a remote control for a `cloudflared` running elsewhere. Tunnels on other machines are listed so you can see them, nothing more.
+
 ## CLI Commands
 
 ### Persistent Tunnels

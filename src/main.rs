@@ -13,6 +13,7 @@ use clap::Parser;
 use cli::{AccountCommands, Cli, Commands, ZonesCommands};
 use config::Account;
 use state::{write_tunnel_config, PersistentTunnel, TunnelState};
+use std::collections::HashSet;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -785,29 +786,99 @@ async fn cmd_zones_default(domain: String, account: Option<&str>) -> Result<()> 
 
 async fn cmd_list(account: Option<&str>) -> Result<()> {
     let cfg = config::load_config()?;
-    let account_name = cfg.get_account(account)?.name.clone();
+    let acct = cfg.get_account(account)?;
+    let account_name = acct.name.clone();
     let state = TunnelState::load()?;
 
     let tunnels: Vec<_> = state.tunnels_for_account(&account_name);
+    let managed_names: HashSet<&str> = tunnels.iter().map(|t| t.name.as_str()).collect();
+    let managed_ids: HashSet<&str> = tunnels.iter().map(|t| t.tunnel_id.as_str()).collect();
 
     if tunnels.is_empty() {
-        println!("No tunnels configured for account '{}'.", account_name);
+        println!(
+            "No tunnels managed by ytunnel for account '{}'.",
+            account_name
+        );
         println!("Add one with: ytunnel add <name> <target>");
-        return Ok(());
+    } else {
+        println!("Tunnels for account '{}':", account_name);
+        for tunnel in &tunnels {
+            let status = daemon::get_daemon_status(tunnel).await;
+            let status_symbol = status.symbol();
+            let status_text = match status {
+                state::TunnelStatus::Running => "running",
+                state::TunnelStatus::Stopped => "stopped",
+                state::TunnelStatus::Error => "error",
+            };
+            println!(
+                "  {} {:<12} {} -> {} ({})",
+                status_symbol, tunnel.name, tunnel.hostname, tunnel.target, status_text
+            );
+        }
     }
 
-    println!("Tunnels for account '{}':", account_name);
-    for tunnel in tunnels {
-        let status = daemon::get_daemon_status(tunnel).await;
-        let status_symbol = status.symbol();
-        let status_text = match status {
-            state::TunnelStatus::Running => "running",
-            state::TunnelStatus::Stopped => "stopped",
-            state::TunnelStatus::Error => "error",
-        };
+    // Get the local tunnels on screen before the network call, so the slow part
+    // never delays the part we already know
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    // Ask Cloudflare what else is on the account. Without this an account with
+    // hand-made tunnels, or tunnels running on another machine, looks empty.
+    let client = cloudflare::Client::new(&acct.api_token);
+    let discovered = match client.list_tunnels(&acct.account_id).await {
+        Ok(list) => list,
+        Err(e) => {
+            eprintln!("\nCould not check Cloudflare for other tunnels: {}", e);
+            return Ok(());
+        }
+    };
+
+    let mut ephemeral = Vec::new();
+    let mut external = Vec::new();
+
+    for cf_tunnel in discovered {
+        if cf_tunnel.deleted_at.is_some() || managed_ids.contains(cf_tunnel.id.as_str()) {
+            continue;
+        }
+
+        match cf_tunnel.name.strip_prefix("ytunnel-") {
+            // Created by `ytunnel run` on this machine but never persisted
+            Some(short) if !managed_names.contains(short) => ephemeral.push(cf_tunnel),
+            Some(_) => {}
+            None => external.push(cf_tunnel),
+        }
+    }
+
+    if !ephemeral.is_empty() {
+        println!("\nEphemeral tunnels (created with `ytunnel run`):");
+        for cf_tunnel in &ephemeral {
+            let short = cf_tunnel
+                .name
+                .strip_prefix("ytunnel-")
+                .unwrap_or(&cf_tunnel.name);
+            println!("  {:<12} ({})", short, cf_tunnel.status_label());
+        }
+        println!("\n  Run `ytunnel` and press [m] to import one as a managed tunnel.");
+    }
+
+    if !external.is_empty() {
+        println!("\nNot managed by ytunnel:");
+        for cf_tunnel in &external {
+            let symbol = if cf_tunnel.is_connected() {
+                "●"
+            } else {
+                "○"
+            };
+            println!(
+                "  {} {:<12} ({})",
+                symbol,
+                cf_tunnel.name,
+                cf_tunnel.status_label()
+            );
+        }
         println!(
-            "  {} {:<12} {} -> {} ({})",
-            status_symbol, tunnel.name, tunnel.hostname, tunnel.target, status_text
+            "\n  These exist on the Cloudflare account but weren't created by ytunnel, so it\n  \
+             can't start, stop, or edit them. Tunnels whose cloudflared runs on another\n  \
+             machine will always appear here. Status comes from Cloudflare, not this machine."
         );
     }
 

@@ -287,12 +287,16 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
                 base_style.fg(Color::Gray)
             };
 
-            // Show ephemeral tunnels with italic
+            // Show tunnels ytunnel doesn't manage with italic
             let (final_name_style, hostname_display) = match entry.kind {
                 TunnelKind::Managed => (name_style, entry.tunnel.hostname.clone()),
                 TunnelKind::Ephemeral => (
                     name_style.add_modifier(Modifier::ITALIC),
                     format!("{} [ephemeral]", entry.tunnel.name),
+                ),
+                TunnelKind::External => (
+                    name_style.add_modifier(Modifier::ITALIC),
+                    "[not managed by ytunnel]".to_string(),
                 ),
             };
 
@@ -389,11 +393,22 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    // Format target URL for display
-    let target_url = if target.starts_with("http://") || target.starts_with("https://") {
+    // We know neither the target nor the hostname of a tunnel ytunnel didn't
+    // create, so show why rather than a bare "http://"
+    let unknown = "unknown (config lives on the machine running cloudflared)";
+
+    let target_url = if target.is_empty() {
+        unknown.to_string()
+    } else if target.starts_with("http://") || target.starts_with("https://") {
         target.to_string()
     } else {
         format!("http://{}", target)
+    };
+
+    let public_url = if hostname.is_empty() {
+        unknown.to_string()
+    } else {
+        format!("https://{}", hostname)
     };
 
     let lines = vec![
@@ -403,10 +418,7 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Public URL:  ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("https://{}", hostname),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(public_url, Style::default().fg(Color::Cyan)),
         ]),
     ];
 
@@ -559,13 +571,6 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
                     .to_string()
             } else {
-                // Show different help based on whether an ephemeral tunnel is selected
-                let is_ephemeral = app
-                    .tunnels
-                    .get(app.selected)
-                    .map(|e| e.kind == TunnelKind::Ephemeral)
-                    .unwrap_or(false);
-
                 // Show account switching hint if multiple accounts
                 let account_hint = if app.accounts.len() > 1 {
                     " [;]account"
@@ -573,13 +578,17 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                     ""
                 };
 
-                if is_ephemeral {
-                    format!(
+                // Only offer actions that apply to the selected tunnel's kind
+                match app.selected_kind() {
+                    Some(TunnelKind::Ephemeral) => format!(
                         " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
                         account_hint
-                    )
-                } else {
-                    format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+                    ),
+                    Some(TunnelKind::External) => format!(
+                        " (not managed by ytunnel) [a]dd [r]efresh{} [?]help [q]uit",
+                        account_hint
+                    ),
+                    _ => format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint),
                 }
             }
         }

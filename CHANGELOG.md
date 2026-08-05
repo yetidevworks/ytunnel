@@ -1,6 +1,6 @@
 ## Changelog
 
-### v0.10.0
+### v1.0.0
 
 - **`ytunnel doctor`** - New command that reports leftovers: DNS records still pointing at deleted tunnels, and local state entries whose Cloudflare tunnel is gone. `--fix` removes them (with a prompt), `--all` checks every configured account
 - **Fix DNS records surviving tunnel deletion** - Deleting an ephemeral tunnel, from the TUI or via `ytunnel delete`, removed the tunnel but left its CNAME behind. `ytunnel run` creates a DNS record, so any run that was killed rather than stopped cleanly left one stranded

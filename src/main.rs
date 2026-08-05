@@ -8,7 +8,7 @@ mod tui;
 mod tunnel;
 mod update;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{AccountCommands, Cli, Commands, ZonesCommands};
 use config::Account;
@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
             | Some(Commands::Zones { .. })
             | Some(Commands::List)
             | Some(Commands::Delete { .. })
+            | Some(Commands::Doctor { .. })
             | Some(Commands::Reset { .. })
             | Some(Commands::Account { .. })
     );
@@ -87,6 +88,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Delete { name }) => {
             cmd_delete(name, account).await?;
+        }
+        Some(Commands::Doctor { fix, yes, all }) => {
+            cmd_doctor(fix, yes, all, account).await?;
         }
         Some(Commands::Reset { yes }) => {
             cmd_reset(yes).await?;
@@ -427,10 +431,14 @@ async fn cmd_run(
         println!("\nCleaning up...");
 
         // Delete DNS record
-        if let Err(e) = client.delete_dns_record(&zone_id, &full_hostname).await {
-            eprintln!("Warning: Failed to delete DNS record: {}", e);
-        } else {
-            println!("✓ Removed DNS record: {}", full_hostname);
+        let cleanup = client
+            .delete_tunnel_dns_records(&acct.zones, &tunnel.id)
+            .await;
+        for error in &cleanup.errors {
+            eprintln!("Warning: Failed to delete DNS record: {}", error);
+        }
+        for hostname in &cleanup.removed {
+            println!("✓ Removed DNS record: {}", hostname);
         }
 
         // Delete tunnel from Cloudflare
@@ -908,19 +916,23 @@ async fn cmd_delete(name: String, account: Option<&str>) -> Result<()> {
     // Remove from state
     let mut state = TunnelState::load()?;
     if let Some(tunnel) = state.remove_for_account(&name, &account_name) {
-        // Delete the DNS CNAME record
-        client
-            .delete_dns_record(&tunnel.zone_id, &tunnel.hostname)
-            .await
-            .ok();
-        println!("✓ Deleted DNS record");
+        // Delete the DNS CNAME records, matched by what they point at rather
+        // than a stored hostname that may be stale
+        let cleanup = client
+            .delete_tunnel_dns_records(&acct.zones, &tunnel.tunnel_id)
+            .await;
+        if let Some(summary) = cleanup.summary() {
+            println!("{}", summary);
+        }
 
         // Delete from Cloudflare
-        client
+        match client
             .delete_tunnel(&acct.account_id, &tunnel.tunnel_id)
             .await
-            .ok();
-        println!("✓ Deleted Cloudflare tunnel");
+        {
+            Ok(()) => println!("✓ Deleted Cloudflare tunnel"),
+            Err(e) => eprintln!("✗ Could not delete the Cloudflare tunnel: {}", e),
+        }
 
         // Remove credentials file
         if let Ok(creds_path) = tunnel.credentials_path() {
@@ -951,6 +963,14 @@ async fn cmd_delete(name: String, account: Option<&str>) -> Result<()> {
                 if let Ok(creds_path) = t.credentials_path() {
                     std::fs::remove_file(&creds_path).ok();
                 }
+
+                // `ytunnel run` creates a CNAME too, so it has to go with the
+                // tunnel even though there's no local state describing it
+                let cleanup = client.delete_tunnel_dns_records(&acct.zones, &t.id).await;
+                if let Some(summary) = cleanup.summary() {
+                    println!("{}", summary);
+                }
+
                 client.delete_tunnel(&acct.account_id, &t.id).await?;
                 println!("✓ Deleted Cloudflare tunnel: {}", tunnel_name);
             }
@@ -963,6 +983,156 @@ async fn cmd_delete(name: String, account: Option<&str>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// A DNS record pointing at a tunnel that no longer exists
+struct OrphanRecord {
+    account_name: String,
+    zone_id: String,
+    zone_name: String,
+    record_id: String,
+    hostname: String,
+    tunnel_id: String,
+}
+
+// Look for leftovers: CNAMEs pointing at deleted tunnels, and local state
+// entries whose Cloudflare tunnel is gone
+async fn cmd_doctor(fix: bool, skip_confirm: bool, all: bool, account: Option<&str>) -> Result<()> {
+    let cfg = config::load_config()?;
+    let accounts: Vec<&Account> = if all {
+        cfg.accounts.iter().collect()
+    } else {
+        vec![cfg.get_account(account)?]
+    };
+
+    let state = TunnelState::load()?;
+    let mut orphans: Vec<OrphanRecord> = Vec::new();
+    let mut stale_state: Vec<(String, String)> = Vec::new();
+
+    for acct in &accounts {
+        let client = cloudflare::Client::new(&acct.api_token);
+
+        let tunnels = client
+            .list_tunnels(&acct.account_id)
+            .await
+            .with_context(|| format!("Could not list tunnels for account '{}'", acct.name))?;
+        let live: HashSet<&str> = tunnels
+            .iter()
+            .filter(|t| t.deleted_at.is_none())
+            .map(|t| t.id.as_str())
+            .collect();
+
+        // Local tunnels whose Cloudflare side has gone away
+        for tunnel in state.tunnels_for_account(&acct.name) {
+            if !live.contains(tunnel.tunnel_id.as_str()) {
+                stale_state.push((acct.name.clone(), tunnel.name.clone()));
+            }
+        }
+
+        // CNAMEs still pointing into cfargotunnel.com for tunnels that are gone
+        for zone in &acct.zones {
+            let records = client
+                .list_tunnel_dns_records(&zone.id)
+                .await
+                .with_context(|| format!("Could not list DNS records for zone '{}'", zone.name))?;
+
+            for record in records {
+                let tunnel_id = record
+                    .content
+                    .strip_suffix(".cfargotunnel.com")
+                    .unwrap_or_default();
+                if tunnel_id.is_empty() || live.contains(tunnel_id) {
+                    continue;
+                }
+                orphans.push(OrphanRecord {
+                    account_name: acct.name.clone(),
+                    zone_id: zone.id.clone(),
+                    zone_name: zone.name.clone(),
+                    record_id: record.id,
+                    hostname: record.name,
+                    tunnel_id: tunnel_id.to_string(),
+                });
+            }
+        }
+    }
+
+    if orphans.is_empty() && stale_state.is_empty() {
+        println!("✓ Nothing to clean up.");
+        return Ok(());
+    }
+
+    if !stale_state.is_empty() {
+        println!(
+            "Tunnels in local state that no longer exist on Cloudflare ({}):",
+            stale_state.len()
+        );
+        for (account_name, name) in &stale_state {
+            println!("  {:<20} (account '{}')", name, account_name);
+        }
+        println!("\n  Remove with: ytunnel delete <name>\n");
+    }
+
+    if orphans.is_empty() {
+        return Ok(());
+    }
+
+    println!("Orphaned DNS records ({}):", orphans.len());
+    for orphan in &orphans {
+        println!(
+            "  {:<38} in {} -> tunnel {} (deleted)",
+            orphan.hostname, orphan.zone_name, orphan.tunnel_id
+        );
+    }
+
+    if !fix {
+        println!("\n  These CNAMEs point at tunnels that no longer exist, so they resolve");
+        println!("  to nothing. Remove them with: ytunnel doctor --fix");
+        return Ok(());
+    }
+
+    if !skip_confirm {
+        println!("\nDelete these {} DNS records? [y/N]", orphans.len());
+        print!("> ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut confirm = String::new();
+        std::io::stdin().read_line(&mut confirm)?;
+        if confirm.trim().to_lowercase() != "y" {
+            println!("Cancelled. Nothing was deleted.");
+            return Ok(());
+        }
+    }
+
+    println!();
+    let mut failed = 0;
+    for orphan in &orphans {
+        let acct = accounts
+            .iter()
+            .find(|a| a.name == orphan.account_name)
+            .expect("orphan came from this list");
+        let client = cloudflare::Client::new(&acct.api_token);
+
+        match client
+            .delete_dns_record_by_id(&orphan.zone_id, &orphan.record_id)
+            .await
+        {
+            Ok(()) => println!("✓ Deleted {}", orphan.hostname),
+            Err(e) => {
+                failed += 1;
+                eprintln!("✗ Could not delete {}: {}", orphan.hostname, e);
+            }
+        }
+    }
+
+    if failed > 0 {
+        anyhow::bail!(
+            "{} of {} records could not be deleted",
+            failed,
+            orphans.len()
+        );
+    }
+
+    println!("\n✓ Removed {} orphaned DNS records.", orphans.len());
     Ok(())
 }
 

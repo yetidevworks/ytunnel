@@ -332,6 +332,29 @@ ytunnel zones
 ytunnel zones default dev.example.com
 ```
 
+### Maintenance
+
+```bash
+# Report leftovers on the selected account
+ytunnel doctor
+
+# Check every configured account
+ytunnel doctor --all
+
+# Delete what it finds (prompts first)
+ytunnel doctor --fix
+
+# Skip the prompt
+ytunnel doctor --fix --yes
+```
+
+`doctor` looks for two things:
+
+- **Orphaned DNS records** - CNAMEs still pointing at `<tunnel-id>.cfargotunnel.com` for a tunnel that no longer exists. These resolve to nothing. They're usually left over from a `ytunnel run` that was killed rather than stopped cleanly, or from an older ytunnel that didn't clean up DNS on delete
+- **Stale local state** - tunnels in `tunnels.toml` whose Cloudflare tunnel has been deleted elsewhere
+
+Nothing is removed without `--fix`, and `--fix` prompts before deleting unless you pass `--yes`.
+
 ## Configuration
 
 ### File Locations

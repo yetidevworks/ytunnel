@@ -208,7 +208,11 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `m` | Import ephemeral tunnel as managed |
 | `;` | Cycle through accounts (when multiple configured) |
 | `r` | Refresh status |
-| `↑/↓` or `j/k` | Navigate list |
+| `↑/↓` or `j/k` | Navigate list (scroll logs when the log pane has focus) |
+| `Tab` | Switch focus between the tunnel list and the log pane |
+| `PgUp/PgDn` | Scroll logs a page |
+| `Ctrl+U/Ctrl+D` | Scroll logs half a page |
+| `Home/End` | Jump to the oldest / newest log line (`End` resumes following) |
 | `q` | Quit |
 
 Tunnels continue running in the background after you close the TUI.

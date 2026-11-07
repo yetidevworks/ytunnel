@@ -98,8 +98,18 @@ pub fn render(f: &mut Frame, app: &App) {
             app.is_importing,
         ),
         InputMode::AddZone => render_zone_dialog(f, app),
-        InputMode::EditTarget => render_edit_dialog(f, app, "Edit target URL:"),
-        InputMode::EditZone => render_edit_zone_dialog(f, app),
+        InputMode::EditSheet
+        | InputMode::EditSheetInput { .. }
+        | InputMode::EditSheetBasicInput { .. }
+        | InputMode::EditSheetPicker { .. }
+        | InputMode::EditSheetZonePicker { .. }
+        | InputMode::EditSheetLogModePicker { .. }
+        | InputMode::EditSheetConfirmDiscard => {
+            if let Some(sheet) = app.edit_sheet.as_ref() {
+                crate::tui::edit_sheet::render(f, f.area(), sheet);
+            }
+            render_sheet_modal_overlays(f, app);
+        }
         InputMode::Confirm => {
             if let Some(ref msg) = app.confirm_message {
                 render_confirm_dialog(f, msg);
@@ -355,11 +365,55 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
+    let log_mode = app
+        .tunnels
+        .get(app.selected)
+        .map(|e| e.tunnel.log_mode)
+        .unwrap_or_default();
 
-    let all_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
+    let raw_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
         Some(tail) if !tail.is_empty() => tail.lines().map(String::from).collect(),
         Some(_) => vec!["No logs yet".to_string()],
         None => vec!["No tunnel selected".to_string()],
+    };
+
+    let all_lines: Vec<String> = if log_mode == crate::state::LogMode::NgrokDev {
+        let mut filter = crate::tui::log_filter::NgrokDevFilter::new();
+        let mut filtered: Vec<String> = raw_lines
+            .iter()
+            .filter_map(|l| filter.process_line(l))
+            .collect();
+        filtered.extend(filter.flush_pending());
+        if !filtered.is_empty() {
+            filtered.insert(
+                0,
+                format!(
+                    "{}  {:<6} {:<40}  {:<3}  {:>7}",
+                    "time    ", "method", "path", "sts", "bytes"
+                ),
+            );
+            filtered.insert(
+                1,
+                format!(
+                    "{}  {:<6} {:<40}  {:<3}  {:>7}",
+                    "────────",
+                    "──────",
+                    "────────────────────────────────────────",
+                    "───",
+                    "───────"
+                ),
+            );
+        }
+        if filtered.is_empty() && !raw_lines.is_empty() {
+            vec![
+                "(ngrok-dev: no HTTP requests yet — hit a URL on your tunnel to see them appear)"
+                    .to_string(),
+            ]
+        } else {
+            filtered
+        }
+    } else {
+        raw_lines
     };
 
     // Determine visible slice based on scroll offset.
@@ -372,17 +426,31 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 
     let log_lines: Vec<Line> = visible
         .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), raw_line_style(l))))
+        .map(|l| {
+            let style = match log_mode {
+                crate::state::LogMode::NgrokDev => ngrok_dev_line_style(l),
+                _ => raw_line_style(l),
+            };
+            Line::from(Span::styled(l.clone(), style))
+        })
         .collect();
 
+    let mode_tag = match log_mode {
+        crate::state::LogMode::Default => "",
+        crate::state::LogMode::Debug => " [debug]",
+        crate::state::LogMode::NgrokDev => " [ngrok-dev]",
+    };
     let name_tag = name
         .as_deref()
         .map(|n| format!(": {}", n))
         .unwrap_or_default();
     let title = if app.log_follow {
-        format!(" Logs{} ({}) ", name_tag, total)
+        format!(" Logs{}{} ({}) ", name_tag, mode_tag, total)
     } else {
-        format!(" Logs{} ({} — scrolled, End to follow) ", name_tag, total)
+        format!(
+            " Logs{}{} ({} — scrolled, End to follow) ",
+            name_tag, mode_tag, total
+        )
     };
     let logs_border_style = if app.focus == Focus::Logs {
         Style::default().fg(Color::Yellow)
@@ -400,10 +468,10 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(logs, area);
 }
 
-// Color raw cloudflared lines by level marker (ERR red, WRN yellow, INF
-// green), plus HTTP status-class coloring for DBG response lines (2xx green,
-// 3xx cyan, 4xx yellow, 5xx magenta). Everything else stays white for
-// readability.
+// Color raw cloudflared lines by level marker. Matches the original palette
+// (ERR red, WRN yellow, INF green) plus HTTP status-class coloring for DBG
+// response lines (2xx green, 3xx cyan, 4xx yellow, 5xx magenta). Everything
+// else stays white for readability.
 fn raw_line_style(line: &str) -> Style {
     if line.contains("ERR") {
         return Style::default().fg(Color::Red);
@@ -432,6 +500,38 @@ fn raw_line_style(line: &str) -> Style {
         }
     }
     Style::default().fg(Color::White)
+}
+
+// Color ngrok-dev formatted rows by HTTP status class (2xx green, 3xx cyan,
+// 4xx yellow, 5xx magenta, ERROR/[pending] red/gray). Header row is dim.
+fn ngrok_dev_line_style(line: &str) -> Style {
+    // Header + separator rows.
+    if line.starts_with("time    ") || line.starts_with("────────") {
+        return Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD);
+    }
+    if line.contains("  ERROR  ") {
+        return Style::default().fg(Color::Red);
+    }
+    if line.contains("[pending]") {
+        return Style::default().fg(Color::DarkGray);
+    }
+    // Scan for the status code after the path column. Format: "HH:MM:SS  METHOD path... STATUS BYTES"
+    // Extract the STATUS token — first 3-digit ASCII number after column 60ish.
+    for token in line.split_whitespace() {
+        if token.len() == 3 && token.chars().all(|c| c.is_ascii_digit()) {
+            let first = token.chars().next().unwrap();
+            return match first {
+                '2' => Style::default().fg(Color::Green),
+                '3' => Style::default().fg(Color::Cyan),
+                '4' => Style::default().fg(Color::Yellow),
+                '5' => Style::default().fg(Color::Magenta),
+                _ => Style::default().fg(Color::Gray),
+            };
+        }
+    }
+    Style::default().fg(Color::Gray)
 }
 
 fn render_details(f: &mut Frame, app: &App, area: Rect) {
@@ -643,8 +743,37 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             " Enter value, then press Enter. Esc to cancel.".to_string()
         }
         InputMode::AddZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
-        InputMode::EditTarget => " Edit target URL, then press Enter. Esc to cancel.".to_string(),
-        InputMode::EditZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
+        InputMode::EditSheet => {
+            // Show tab-specific help.
+            let is_basic = app
+                .edit_sheet
+                .as_ref()
+                .map(|s| s.active_tab == crate::tui::edit_sheet::SheetTab::Basic)
+                .unwrap_or(true);
+            if is_basic {
+                " ↑/↓: select   Enter: edit   Tab: switch pane   Ctrl+S: save   Esc: cancel"
+                    .to_string()
+            } else {
+                " ↑/↓: select   Enter: edit   d: clear   Tab: switch pane   Ctrl+S: save   Esc: cancel"
+                    .to_string()
+            }
+        }
+        InputMode::EditSheetInput { .. } => {
+            " Type value   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetBasicInput { .. } => {
+            " Type value   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetPicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetZonePicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetLogModePicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetConfirmDiscard => " y: discard   n/Esc: keep editing".to_string(),
         InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
         InputMode::Help => " Press Esc or ? to close help".to_string(),
     };
@@ -775,126 +904,202 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
     f.render_widget(content, area);
 }
 
-fn render_edit_dialog(f: &mut Frame, app: &App, prompt: &str) {
-    let area = centered_rect(60, 30, f.area());
-
-    // Clear the area
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Edit Tunnel ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    f.render_widget(block, area);
-
-    // Build styled content showing tunnel being edited
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Editing: "),
-            Span::styled(
-                app.editing_tunnel_name.as_deref().unwrap_or(""),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&app.input, Style::default().fg(Color::Green)),
-            Span::styled("_", Style::default().fg(Color::White)),
-        ]),
-    ];
-
-    let text = Paragraph::new(lines)
-        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
-
-    f.render_widget(text, area);
+fn basic_field_human_name(field: crate::tui::edit_sheet::BasicField) -> &'static str {
+    use crate::tui::edit_sheet::BasicField;
+    match field {
+        BasicField::Target => "Target URL",
+        BasicField::MetricsPort => "Metrics port",
+    }
 }
 
-fn render_edit_zone_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, f.area());
-
-    // Clear the area
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Edit: Select Zone ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    f.render_widget(block, area);
-
-    // Build zone lines with selection indicator
-    let header_lines = 6; // Editing, Name, Target, empty, Select zone:, empty
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::raw("Editing: "),
-            Span::styled(
-                app.editing_tunnel_name.as_deref().unwrap_or(""),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("New Target: "),
-            Span::styled(
-                app.new_tunnel_target.as_deref().unwrap_or(""),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Select zone:",
-            Style::default().fg(Color::Yellow),
-        )),
-        Line::from(""),
-    ];
-
-    // Add zone options
-    for (i, zone) in app.zones.iter().enumerate() {
-        let selected = i == app.zone_selected;
-        let is_original = app.original_zone_id.as_deref() == Some(&zone.id);
-        let prefix = if selected { "> " } else { "  " };
-        let suffix = if is_original { " (current)" } else { "" };
-        let style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, zone.name, suffix),
-            style,
-        )));
-    }
-
-    // Calculate scroll to keep selected item visible
-    let available_height = area.height.saturating_sub(4) as usize;
-    let scroll = if available_height > header_lines {
-        let visible_zones = available_height - header_lines;
-        if app.zone_selected >= visible_zones {
-            (app.zone_selected - visible_zones + 1) as u16
-        } else {
-            0
+fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
+    let yellow = Style::default().fg(Color::Yellow);
+    let bold_yellow = yellow.add_modifier(Modifier::BOLD);
+    let padding = ratatui::widgets::Padding::new(2, 2, 1, 1);
+    match &app.input_mode {
+        InputMode::EditSheetBasicInput { field, buffer } => {
+            let area = centered_rect(50, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(
+                    format!(" Edit: {} ", basic_field_human_name(*field)),
+                    bold_yellow,
+                ))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let p = Paragraph::new(buffer.as_str())
+                .style(Style::default().fg(Color::Green))
+                .wrap(Wrap { trim: false });
+            f.render_widget(p, inner);
         }
-    } else {
-        0
-    };
+        InputMode::EditSheetInput { yaml_key, buffer } => {
+            let area = centered_rect(50, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(format!(" Edit: {} ", yaml_key), bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            if buffer.is_empty() {
+                if let Some(hint) = placeholder_for(yaml_key) {
+                    let p = Paragraph::new(hint)
+                        .style(Style::default().fg(Color::DarkGray))
+                        .wrap(Wrap { trim: false });
+                    f.render_widget(p, inner);
+                }
+            } else {
+                let p = Paragraph::new(buffer.as_str())
+                    .style(Style::default().fg(Color::Green))
+                    .wrap(Wrap { trim: false });
+                f.render_widget(p, inner);
+            }
+        }
+        InputMode::EditSheetPicker { yaml_key, cursor } => {
+            let Some(spec) = crate::cloudflared_options::find(yaml_key) else {
+                return;
+            };
+            let crate::cloudflared_options::OptionKind::Enum { choices, .. } = &spec.kind else {
+                return;
+            };
+            let area = centered_rect(30, 40, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(format!(" Choose: {} ", yaml_key), bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let items: Vec<ListItem> = choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let display = if c.is_empty() { "(unset)" } else { c };
+                    let is_sel = i == *cursor;
+                    let marker = if is_sel { "› " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Span::styled(format!("{}{}", marker, display), style))
+                })
+                .collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetZonePicker { cursor } => {
+            let area = centered_rect(40, 60, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(" Choose zone ", bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let items: Vec<ListItem> = app
+                .zones
+                .iter()
+                .enumerate()
+                .map(|(i, z)| {
+                    let is_sel = i == *cursor;
+                    let marker = if is_sel { "› " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Span::styled(format!("{}{}", marker, z.name), style))
+                })
+                .collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetLogModePicker { cursor } => {
+            let choices = ["Default", "Debug", "ngrok-dev"];
+            let area = centered_rect(30, 30, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(" Choose log mode ", bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let items: Vec<ListItem> = choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let is_sel = i == *cursor;
+                    let marker = if is_sel { "› " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Span::styled(format!("{}{}", marker, c), style))
+                })
+                .collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetConfirmDiscard => {
+            let area = centered_rect(40, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(" Discard changes? ", bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let lines = vec![
+                Line::from(Span::styled(
+                    "You have unsaved edits.",
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        "[y]",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("es discard   "),
+                    Span::styled(
+                        "[n]",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("o / Esc keep editing"),
+                ]),
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        _ => {}
+    }
+}
 
-    let content = Paragraph::new(lines)
-        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)))
-        .scroll((scroll, 0));
-
-    f.render_widget(content, area);
+// Look up the placeholder hint text for an option's editor field.
+// Returns None for kinds that don't carry a placeholder (Duration, Enum, Int, Bool).
+fn placeholder_for(yaml_key: &str) -> Option<&'static str> {
+    let spec = crate::cloudflared_options::find(yaml_key)?;
+    match &spec.kind {
+        crate::cloudflared_options::OptionKind::String { placeholder, .. } => Some(placeholder),
+        crate::cloudflared_options::OptionKind::List { placeholder } => Some(placeholder),
+        _ => None,
+    }
 }
 
 fn render_confirm_dialog(f: &mut Frame, message: &str) {

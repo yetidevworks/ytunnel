@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, HealthStatus, InputMode, TunnelKind};
+use super::app::{App, Focus, HealthStatus, InputMode, TunnelKind};
 use crate::metrics::TunnelMetrics;
 use crate::state::TunnelStatus;
 
@@ -133,12 +133,16 @@ fn render_help_modal(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from(vec![
+            Span::styled("  Tab      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Switch focus between tunnel list and log pane"),
+        ]),
+        Line::from(vec![
             Span::styled("  ↑/k      ", Style::default().fg(Color::Cyan)),
-            Span::raw("Move selection up"),
+            Span::raw("Move selection up (or scroll logs when log pane focused)"),
         ]),
         Line::from(vec![
             Span::styled("  ↓/j      ", Style::default().fg(Color::Cyan)),
-            Span::raw("Move selection down"),
+            Span::raw("Move selection down (or scroll logs when log pane focused)"),
         ]),
         Line::from(vec![
             Span::styled("  q        ", Style::default().fg(Color::Cyan)),
@@ -334,32 +338,39 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let tunnels_border_style = if app.focus == Focus::Tunnels {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let tunnels_list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(tunnels_border_style),
     );
 
     f.render_widget(tunnels_list, area);
 }
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
-    let title = if let Some(entry) = app.tunnels.get(app.selected) {
-        format!(" Logs: {} ", entry.tunnel.name)
-    } else {
-        " Logs ".to_string()
+    let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
+
+    let all_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
+        Some(tail) if !tail.is_empty() => tail.lines().map(String::from).collect(),
+        Some(_) => vec!["No logs yet".to_string()],
+        None => vec!["No tunnel selected".to_string()],
     };
 
-    // Take last N lines that fit in the area
-    let available_height = area.height.saturating_sub(2) as usize; // -2 for borders
-    let start = if app.logs.len() > available_height {
-        app.logs.len() - available_height
-    } else {
-        0
-    };
+    // Determine visible slice based on scroll offset.
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total = all_lines.len();
+    let scroll = (app.log_scroll as usize).min(total.saturating_sub(1));
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(visible_height);
+    let visible = &all_lines[start..end];
 
-    let log_lines: Vec<Line> = app.logs[start..]
+    let log_lines: Vec<Line> = visible
         .iter()
         .map(|line| {
             let color = if line.contains("ERR") {
@@ -375,15 +386,28 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let name_tag = name
+        .as_deref()
+        .map(|n| format!(": {}", n))
+        .unwrap_or_default();
+    let title = if app.log_follow {
+        format!(" Logs{} ({}) ", name_tag, total)
+    } else {
+        format!(" Logs{} ({} — scrolled, End to follow) ", name_tag, total)
+    };
+    let logs_border_style = if app.focus == Focus::Logs {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let logs = Paragraph::new(log_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(logs_border_style)
+                .title(title),
         )
         .wrap(Wrap { trim: false });
-
     f.render_widget(logs, area);
 }
 
@@ -568,7 +592,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => {
             if app.demo {
-                " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
+                " (demo) Tab:focus  \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
                     .to_string()
             } else {
                 // Show account switching hint if multiple accounts
@@ -581,14 +605,14 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
                 // Only offer actions that apply to the selected tunnel's kind
                 match app.selected_kind() {
                     Some(TunnelKind::Ephemeral) => format!(
-                        " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
+                        " Tab:focus [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
                         account_hint
                     ),
                     Some(TunnelKind::External) => format!(
-                        " (not managed by ytunnel) [a]dd [r]efresh{} [?]help [q]uit",
+                        " Tab:focus (not managed by ytunnel) [a]dd [r]efresh{} [?]help [q]uit",
                         account_hint
                     ),
-                    _ => format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint),
+                    _ => format!(" Tab:focus [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint),
                 }
             }
         }

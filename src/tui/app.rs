@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -299,6 +299,17 @@ async fn edit_tunnel_op(
     Ok(name)
 }
 
+// Route a mouse event to the log pane. Mouse capture is only enabled while
+// focus is on Logs (see Tab handler), so any mouse event we receive here is
+// for scrolling the logs.
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => app.scroll_logs_up(3),
+        MouseEventKind::ScrollDown => app.scroll_logs_down(3),
+        _ => {}
+    }
+}
+
 // Standalone async operation: delete a tunnel
 async fn delete_tunnel_op(
     name: String,
@@ -450,6 +461,13 @@ fn external_detail(entry: &TunnelEntry) -> Vec<String> {
         "ytunnel can't start, stop, edit, or delete it. Manage it from the".to_string(),
         "Cloudflare dashboard or with cloudflared on the machine running it.".to_string(),
     ]
+}
+
+// Which pane currently has keyboard focus in Normal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tunnels,
+    Logs,
 }
 
 // Input mode for the TUI
@@ -624,8 +642,12 @@ pub struct App {
     pub tunnels: Vec<TunnelEntry>,
     // Currently selected tunnel index
     pub selected: usize,
-    // Log lines for the selected tunnel
-    pub logs: Vec<String>,
+    // Per-tunnel byte-offset log tails (keyed by tunnel name)
+    pub log_tails: HashMap<String, crate::tui::log_tail::LogTail>,
+    // Scroll offset from bottom of log buffer. 0 = follow bottom.
+    pub log_scroll: u16,
+    // True while log_scroll == 0 (auto-scroll to bottom on new lines).
+    pub log_follow: bool,
     // Input buffer for add dialog
     pub input: String,
     // Temporary storage for new tunnel name during add flow
@@ -672,6 +694,8 @@ pub struct App {
     // Background discovery results arrive here
     discovery_tx: mpsc::UnboundedSender<DiscoveryResult>,
     discovery_rx: mpsc::UnboundedReceiver<DiscoveryResult>,
+    // Which pane has keyboard focus in Normal mode.
+    pub focus: Focus,
 }
 
 // Outcome of one background query to Cloudflare for an account's tunnels
@@ -710,7 +734,9 @@ impl App {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
             selected: 0,
-            logs: vec!["Select a tunnel to view logs".to_string()],
+            log_tails: HashMap::new(),
+            log_scroll: 0,
+            log_follow: true,
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -734,6 +760,7 @@ impl App {
             discovery_in_flight: HashSet::new(),
             discovery_tx,
             discovery_rx,
+            focus: Focus::Tunnels,
         }
     }
 
@@ -763,7 +790,9 @@ impl App {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
             selected: 0,
-            logs: vec!["Select a tunnel to view logs".to_string()],
+            log_tails: HashMap::new(),
+            log_scroll: 0,
+            log_follow: true,
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -787,6 +816,7 @@ impl App {
             discovery_in_flight: HashSet::new(),
             discovery_tx,
             discovery_rx,
+            focus: Focus::Tunnels,
         }
     }
 
@@ -990,71 +1020,77 @@ impl App {
         self.refresh_demo_logs();
     }
 
-    // Generate cloudflared-style log lines for demo tunnels
+    // Generate cloudflared-style log lines for demo tunnels (writes into log_tails)
     fn refresh_demo_logs(&mut self) {
-        if let Some(entry) = self.tunnels.get(self.selected) {
+        let lines: Vec<String> = if let Some(entry) = self.tunnels.get(self.selected) {
             match entry.kind {
-                TunnelKind::Ephemeral => {
-                    self.logs = vec![
-                        "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                        String::new(),
-                        format!("Hostname: {}", entry.tunnel.hostname),
-                        format!("Target:   {}", entry.tunnel.target),
-                        format!("Zone:     {}", entry.tunnel.zone_name),
-                        String::new(),
-                        "[demo mode] Press [m] to import as managed tunnel".to_string(),
-                        "[demo mode] Press [d] to delete from Cloudflare".to_string(),
-                    ];
-                }
-                TunnelKind::External => {
-                    self.logs = external_detail(entry);
-                }
+                TunnelKind::Ephemeral => vec![
+                    "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                    String::new(),
+                    format!("Hostname: {}", entry.tunnel.hostname),
+                    format!("Target:   {}", entry.tunnel.target),
+                    format!("Zone:     {}", entry.tunnel.zone_name),
+                    String::new(),
+                    "[demo mode] Press [m] to import as managed tunnel".to_string(),
+                    "[demo mode] Press [d] to delete from Cloudflare".to_string(),
+                ],
+                TunnelKind::External => external_detail(entry),
                 TunnelKind::Managed => match entry.status {
                     TunnelStatus::Running => {
-                        let name = &entry.tunnel.name;
-                        let hostname = &entry.tunnel.hostname;
-                        let target = &entry.tunnel.target;
-                        self.logs = vec![
+                        let name = entry.tunnel.name.clone();
+                        let hostname = entry.tunnel.hostname.clone();
+                        let target = entry.tunnel.target.clone();
+                        vec![
                             format!("INF Starting tunnel tunnelID=demo-{}", name),
-                            format!("INF Version 2024.12.2"),
+                            "INF Version 2024.12.2".to_string(),
                             format!("INF ICMP proxy will use {}:0 as source for both IPv4 and IPv6", target.split(':').next().unwrap_or("localhost")),
-                            format!("INF Starting metrics server on 127.0.0.1:20241"),
-                            format!("INF Registered tunnel connection connIndex=0 connection=demo-conn-0 event=0 ip=198.41.192.77 location=dfw08 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=1 connection=demo-conn-1 event=0 ip=198.41.200.33 location=den01 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=2 connection=demo-conn-2 event=0 ip=198.41.200.13 location=iad02 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=3 connection=demo-conn-3 event=0 ip=198.41.192.47 location=lax01 protocol=quic"),
+                            "INF Starting metrics server on 127.0.0.1:20241".to_string(),
+                            "INF Registered tunnel connection connIndex=0 connection=demo-conn-0 event=0 ip=198.41.192.77 location=dfw08 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=1 connection=demo-conn-1 event=0 ip=198.41.200.33 location=den01 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=2 connection=demo-conn-2 event=0 ip=198.41.200.13 location=iad02 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=3 connection=demo-conn-3 event=0 ip=198.41.192.47 location=lax01 protocol=quic".to_string(),
                             format!("INF Updated tunnel route dns={} tunnelID=demo-{}", hostname, name),
-                            format!("INF Connection established connIndex=0 connection=demo-conn-0 location=dfw08"),
+                            "INF Connection established connIndex=0 connection=demo-conn-0 location=dfw08".to_string(),
                             String::new(),
                             format!("INF GET {} 200 12ms", hostname),
                             format!("INF GET {} 200 8ms", hostname),
                             format!("INF POST {}/api/data 201 45ms", hostname),
                             format!("INF GET {} 200 6ms", hostname),
-                        ];
+                        ]
                     }
                     TunnelStatus::Stopped => {
-                        let name = &entry.tunnel.name;
-                        self.logs = vec![
+                        let name = entry.tunnel.name.clone();
+                        vec![
                             format!("INF Starting tunnel tunnelID=demo-{}", name),
-                            format!("INF Registered tunnel connection connIndex=0 location=dfw08"),
-                            format!("INF Registered tunnel connection connIndex=1 location=den01"),
+                            "INF Registered tunnel connection connIndex=0 location=dfw08"
+                                .to_string(),
+                            "INF Registered tunnel connection connIndex=1 location=den01"
+                                .to_string(),
                             String::new(),
-                            format!("INF Initiating graceful shutdown due to signal"),
-                            format!("INF Quitting..."),
-                            format!("INF Unregistered tunnel connection connIndex=1"),
-                            format!("INF Unregistered tunnel connection connIndex=0"),
-                        ];
+                            "INF Initiating graceful shutdown due to signal".to_string(),
+                            "INF Quitting...".to_string(),
+                            "INF Unregistered tunnel connection connIndex=1".to_string(),
+                            "INF Unregistered tunnel connection connIndex=0".to_string(),
+                        ]
                     }
-                    TunnelStatus::Error => {
-                        self.logs = vec![
-                            "ERR Unable to establish connection".to_string(),
-                            "ERR Retrying in 5s...".to_string(),
-                        ];
-                    }
+                    TunnelStatus::Error => vec![
+                        "ERR Unable to establish connection".to_string(),
+                        "ERR Retrying in 5s...".to_string(),
+                    ],
                 },
             }
         } else {
-            self.logs = vec!["No tunnel selected".to_string()];
+            return;
+        };
+
+        // Inject demo lines into the log_tails map so render_logs can read them.
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            let name = entry.tunnel.name.clone();
+            // Use a dummy path; seed() won't be called for demo tails.
+            let tail = self.log_tails.entry(name).or_insert_with(|| {
+                crate::tui::log_tail::LogTail::new(std::path::PathBuf::new(), 5000)
+            });
+            tail.inject_lines(lines);
         }
     }
 
@@ -1450,47 +1486,65 @@ impl App {
             self.refresh_demo_logs();
             return;
         }
-        if let Some(entry) = self.tunnels.get(self.selected) {
-            match entry.kind {
-                TunnelKind::Managed => match daemon::read_log_tail(&entry.tunnel, 100) {
-                    Ok(lines) => self.logs = lines,
-                    Err(e) => self.logs = vec![format!("Error reading logs: {}", e)],
-                },
-                TunnelKind::Ephemeral => {
-                    let has_config =
-                        entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
-                    self.logs = if has_config {
-                        vec![
-                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                            String::new(),
-                            format!("Hostname: {}", entry.tunnel.hostname),
-                            format!("Target:   {}", entry.tunnel.target),
-                            if !entry.tunnel.zone_name.is_empty() {
-                                format!("Zone:     {}", entry.tunnel.zone_name)
-                            } else {
-                                "Zone:     (will prompt)".to_string()
-                            },
-                            String::new(),
-                            "Press [m] to import as managed tunnel".to_string(),
-                            "Press [d] to delete from Cloudflare".to_string(),
-                        ]
-                    } else {
-                        vec![
-                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                            String::new(),
-                            "Config not found - tunnel may not be running.".to_string(),
-                            String::new(),
-                            "Press [m] to import (will prompt for target)".to_string(),
-                            "Press [d] to delete from Cloudflare".to_string(),
-                        ]
-                    };
-                }
-                TunnelKind::External => {
-                    self.logs = external_detail(entry);
-                }
+        let Some(entry) = self.tunnels.get(self.selected) else {
+            return;
+        };
+        let name = entry.tunnel.name.clone();
+        // Ephemeral and external tunnels have no log file; show their details
+        // in the panel instead, through a placeholder tail like demo mode does
+        let info = match entry.kind {
+            TunnelKind::Managed => None,
+            TunnelKind::Ephemeral => {
+                let has_config =
+                    entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
+                Some(if has_config {
+                    vec![
+                        "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                        String::new(),
+                        format!("Hostname: {}", entry.tunnel.hostname),
+                        format!("Target:   {}", entry.tunnel.target),
+                        if !entry.tunnel.zone_name.is_empty() {
+                            format!("Zone:     {}", entry.tunnel.zone_name)
+                        } else {
+                            "Zone:     (will prompt)".to_string()
+                        },
+                        String::new(),
+                        "Press [m] to import as managed tunnel".to_string(),
+                        "Press [d] to delete from Cloudflare".to_string(),
+                    ]
+                } else {
+                    vec![
+                        "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                        String::new(),
+                        "Config not found - tunnel may not be running.".to_string(),
+                        String::new(),
+                        "Press [m] to import (will prompt for target)".to_string(),
+                        "Press [d] to delete from Cloudflare".to_string(),
+                    ]
+                })
             }
-        } else {
-            self.logs = vec!["No tunnel selected".to_string()];
+            TunnelKind::External => Some(external_detail(entry)),
+        };
+        if let Some(lines) = info {
+            let tail = self.log_tails.entry(name).or_insert_with(|| {
+                crate::tui::log_tail::LogTail::new(std::path::PathBuf::new(), 5000)
+            });
+            tail.inject_lines(lines);
+            return;
+        }
+        let path = match entry.tunnel.log_path() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        match self.log_tails.entry(name) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let _ = e.get_mut().poll();
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let mut tail = crate::tui::log_tail::LogTail::new(path, 5000);
+                let _ = tail.seed();
+                e.insert(tail);
+            }
         }
     }
 
@@ -1730,6 +1784,8 @@ impl App {
     pub fn select_previous(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected > 0 {
             self.selected -= 1;
+            self.log_scroll = 0;
+            self.log_follow = true;
             self.refresh_logs();
             return true; // Selection changed
         }
@@ -1740,10 +1796,38 @@ impl App {
     pub fn select_next(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
             self.selected += 1;
+            self.log_scroll = 0;
+            self.log_follow = true;
             self.refresh_logs();
             return true; // Selection changed
         }
         false
+    }
+
+    // Scroll log view up (toward older lines)
+    pub fn scroll_logs_up(&mut self, n: u16) {
+        self.log_scroll = self.log_scroll.saturating_add(n);
+        self.log_follow = false;
+    }
+
+    // Scroll log view down (toward newer lines)
+    pub fn scroll_logs_down(&mut self, n: u16) {
+        self.log_scroll = self.log_scroll.saturating_sub(n);
+        if self.log_scroll == 0 {
+            self.log_follow = true;
+        }
+    }
+
+    // Jump to the bottom (newest) line and re-enable auto-follow
+    pub fn scroll_logs_bottom(&mut self) {
+        self.log_scroll = 0;
+        self.log_follow = true;
+    }
+
+    // Jump to the top (oldest) line; render clamps to actual buffer size
+    pub fn scroll_logs_top(&mut self) {
+        self.log_scroll = u16::MAX;
+        self.log_follow = false;
     }
 
     // Check if selected tunnel needs a health check (unknown or stale)
@@ -2139,6 +2223,8 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Mouse capture starts OFF — text selection works with native drag.
+    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -2161,7 +2247,8 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -2173,6 +2260,8 @@ pub async fn run_demo_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Mouse capture starts OFF — text selection works with native drag.
+    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -2189,7 +2278,8 @@ pub async fn run_demo_tui() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -2260,6 +2350,15 @@ async fn run_app(
                 continue;
             }
 
+            // Mouse events only arrive while the log pane has focus (capture
+            // is toggled by Tab), so route them to log scrolling.
+            if let Event::Mouse(mouse) = &event {
+                if app.input_mode == InputMode::Normal {
+                    handle_mouse(app, *mouse);
+                }
+                continue;
+            }
+
             if let Event::Key(key) = event {
                 // Handle key press and repeat events (repeat needed for remote desktop)
                 // Skip release events
@@ -2280,7 +2379,8 @@ async fn run_app(
                     execute!(
                         terminal.backend_mut(),
                         LeaveAlternateScreen,
-                        DisableBracketedPaste
+                        DisableBracketedPaste,
+                        DisableMouseCapture
                     )?;
                     terminal.show_cursor()?;
 
@@ -2292,13 +2392,17 @@ async fn run_app(
                         }
                     }
 
-                    // When resumed, restore terminal
+                    // When resumed, restore terminal. Mouse capture is only
+                    // re-enabled if focus is still on Logs.
                     enable_raw_mode()?;
                     execute!(
                         terminal.backend_mut(),
                         EnterAlternateScreen,
                         EnableBracketedPaste
                     )?;
+                    if app.focus == Focus::Logs {
+                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                    }
                     // Force full redraw
                     terminal.clear()?;
                     continue;
@@ -2434,7 +2538,9 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('d') => {
-                            if !app.demo_guard() {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.scroll_logs_down(5);
+                            } else if !app.demo_guard() {
                                 app.request_delete();
                             }
                         }
@@ -2543,19 +2649,48 @@ async fn run_app(
                         KeyCode::Char('?') => {
                             app.input_mode = InputMode::Help;
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.select_previous()
-                                && !app.demo
-                                && app.selected_needs_health_check()
-                            {
-                                app.check_health().await;
-                            }
+                        KeyCode::Tab => {
+                            // Toggle focus AND terminal mouse capture: capture is
+                            // on only when Logs are focused, so users can drag to
+                            // select text in the terminal whenever focus is on
+                            // the tunnel list.
+                            app.focus = match app.focus {
+                                Focus::Tunnels => {
+                                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                                    Focus::Logs
+                                }
+                                Focus::Logs => {
+                                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                                    Focus::Tunnels
+                                }
+                            };
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if app.select_next() && !app.demo && app.selected_needs_health_check() {
-                                app.check_health().await;
+                        KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                            Focus::Tunnels => {
+                                if app.select_previous()
+                                    && !app.demo
+                                    && app.selected_needs_health_check()
+                                {
+                                    app.check_health().await;
+                                }
                             }
-                        }
+                            Focus::Logs => {
+                                app.scroll_logs_up(1);
+                            }
+                        },
+                        KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                            Focus::Tunnels => {
+                                if app.select_next()
+                                    && !app.demo
+                                    && app.selected_needs_health_check()
+                                {
+                                    app.check_health().await;
+                                }
+                            }
+                            Focus::Logs => {
+                                app.scroll_logs_down(1);
+                            }
+                        },
                         // Cycle to the next account. The guard is deliberately
                         // side-effecting: demo_guard sets the "actions
                         // disabled" status message when it returns true, and
@@ -2567,6 +2702,13 @@ async fn run_app(
                             if let Err(e) = app.load_tunnels().await {
                                 app.status_message = Some(format!("Error: {}", e));
                             }
+                        }
+                        KeyCode::PageUp => app.scroll_logs_up(10),
+                        KeyCode::PageDown => app.scroll_logs_down(10),
+                        KeyCode::Home => app.scroll_logs_top(),
+                        KeyCode::End => app.scroll_logs_bottom(),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_logs_up(5);
                         }
                         _ => {}
                     },

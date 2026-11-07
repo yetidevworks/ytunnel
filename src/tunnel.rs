@@ -23,30 +23,19 @@ pub async fn run_tunnel(
     hostname: &str,
     target: &str,
 ) -> Result<()> {
-    // Normalize target URL
-    let target_url = if target.starts_with("http://") || target.starts_with("https://") {
-        target.to_string()
-    } else {
-        format!("http://{}", target)
-    };
+    use std::collections::BTreeMap;
 
-    // Create a temporary config file for this tunnel
     let config_dir = config::config_dir()?;
     let config_path = config_dir.join(format!("tunnel-{}.yml", tunnel_id));
 
-    let config_content = format!(
-        r#"tunnel: {tunnel_id}
-credentials-file: {credentials_path}
-ingress:
-  - hostname: {hostname}
-    service: {target_url}
-  - service: http_status:404
-"#,
-        tunnel_id = tunnel_id,
-        credentials_path = credentials_path.display(),
-        hostname = hostname,
-        target_url = target_url
-    );
+    let config_content = crate::state::build_tunnel_yaml(
+        tunnel_id,
+        credentials_path,
+        hostname,
+        target,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )?;
 
     fs::write(&config_path, &config_content)
         .with_context(|| format!("Failed to write tunnel config to {}", config_path.display()))?;
@@ -62,7 +51,12 @@ ingress:
         .spawn()
         .context("Failed to start cloudflared")?;
 
-    println!("Tunnel running: https://{} -> {}", hostname, target_url);
+    let display_target = if target.starts_with("http://") || target.starts_with("https://") {
+        target.to_string()
+    } else {
+        format!("http://{}", target)
+    };
+    println!("Tunnel running: https://{} -> {}", hostname, display_target);
     println!("{}", "─".repeat(50));
 
     // Stream stderr (cloudflared logs to stderr)

@@ -1,5 +1,16 @@
 ## Changelog
 
+### Unreleased
+
+- **Advanced tunnel options** - The edit sheet has an Advanced tab with about 30 cloudflared options per tunnel, among them `httpHostHeader`, `noTLSVerify`, `protocol`, `retries`, `edge-ip-version` and origin-request tuning. Settings are saved in `tunnels.toml` and written into the generated cloudflared YAML. Tunnels with no options set produce the same YAML as before
+- **Two-tab edit sheet** - `e` opens one sheet in place of the target then zone prompts. Basic holds Target, Zone and Log mode; Advanced holds Auto-start, Metrics port and the cloudflared options. `Tab` switches tabs, `Ctrl+S` saves, `Esc` cancels and asks first if there are unsaved changes
+- **Reload on save** - Saving restarts a running daemon (`launchctl kickstart -k` on macOS, `systemctl --user restart` on Linux) so changes apply straight away
+- **Log mode** - Pick `Default`, `Debug` or `ngrok-dev` on the Basic tab. `ngrok-dev` shows one row per completed request: `HH:MM:SS  METHOD  path  STATUS  size`
+- **Live log tail** - The log panel reads new lines from the log file every second, instead of only after start, stop or import
+- **Scrollable log panel** - `Tab` moves focus to the logs; then `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `Home`/`End` and the mouse wheel scroll through the last 5000 lines. The panel follows new lines until you scroll up. Mouse capture is only on while the logs have focus, so text selection works everywhere else
+- **Log colours** - Debug lines are white instead of grey, and HTTP response lines are coloured by status class (2xx green, 3xx cyan, 4xx yellow, 5xx magenta)
+- **Brighter help bar** - The key hints at the bottom are white instead of dark grey
+
 ### v1.0.0
 
 - **`ytunnel doctor`** - New command that reports leftovers: DNS records still pointing at deleted tunnels, and local state entries whose Cloudflare tunnel is gone. `--fix` removes them (with a prompt), `--all` checks every configured account

@@ -202,6 +202,34 @@ pub async fn uninstall_daemon(tunnel_name: &str, account_name: &str) -> Result<(
 }
 
 #[cfg(target_os = "macos")]
+pub async fn reload_if_installed(tunnel: &PersistentTunnel) -> Result<()> {
+    let path = plist_path(&tunnel.account_name, &tunnel.name)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let label = launchd_label(&tunnel.account_name, &tunnel.name);
+    // `kickstart -k` restarts the service, picking up any changes to the
+    // cloudflared YAML that the plist points at. Try `load` first for good
+    // measure in case the service isn't currently loaded.
+    let _ = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&path)
+        .output()
+        .await;
+    let output = Command::new("launchctl")
+        .args(["kickstart", "-k"])
+        .arg(format!("gui/{}/{}", unsafe { libc::getuid() }, label))
+        .output()
+        .await
+        .context("Failed to run launchctl kickstart")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("launchctl kickstart failed: {}", err.trim());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub async fn start_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
     // Check both new and legacy paths
     let path = match find_plist_path(account_name, tunnel_name)? {
@@ -470,6 +498,25 @@ pub async fn uninstall_daemon(tunnel_name: &str, account_name: &str) -> Result<(
 }
 
 #[cfg(target_os = "linux")]
+pub async fn reload_if_installed(tunnel: &PersistentTunnel) -> Result<()> {
+    let path = service_path(&tunnel.account_name, &tunnel.name)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let svc = service_name(&tunnel.account_name, &tunnel.name);
+    let output = Command::new("systemctl")
+        .args(["--user", "restart", &svc])
+        .output()
+        .await
+        .context("Failed to run systemctl restart")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("systemctl restart failed: {}", err.trim());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub async fn start_daemon(tunnel_name: &str, account_name: &str) -> Result<()> {
     let path = service_path(account_name, tunnel_name)?;
 
@@ -654,4 +701,9 @@ pub async fn is_daemon_running(_tunnel_name: &str, _account_name: &str) -> bool 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn get_daemon_status(_tunnel: &PersistentTunnel) -> TunnelStatus {
     TunnelStatus::Stopped
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn reload_if_installed(_tunnel: &PersistentTunnel) -> Result<()> {
+    Ok(())
 }

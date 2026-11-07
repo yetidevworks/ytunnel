@@ -204,14 +204,43 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `o` | Open tunnel URL in browser |
 | `h` | Check tunnel health |
 | `A` | Toggle auto-start on login (⟳ = enabled) |
+| `e` | Edit selected tunnel (see below) |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
 | `;` | Cycle through accounts (when multiple configured) |
 | `r` | Refresh status |
-| `↑/↓` or `j/k` | Navigate list |
+| `↑/↓` or `j/k` | Navigate list (scroll logs when the log pane has focus) |
+| `Tab` | Switch focus between the tunnel list and the log pane |
+| `PgUp/PgDn` | Scroll logs a page |
+| `Ctrl+U/Ctrl+D` | Scroll logs half a page |
+| `Home/End` | Jump to the oldest / newest log line (`End` resumes following) |
 | `q` | Quit |
 
 Tunnels continue running in the background after you close the TUI.
+
+### Editing tunnels
+
+Press `e` on a tunnel ytunnel manages to open the edit sheet:
+
+- **Basic** - target URL, zone (a picker; saving a new zone moves the DNS record), and Log mode
+- **Advanced** - Auto-start and Metrics port, then about 30 cloudflared options such as `httpHostHeader`, `noTLSVerify`, `protocol`, `retries`, `edge-ip-version` and origin-request tuning
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Switch between Basic and Advanced |
+| `↑` / `↓` | Move between rows |
+| `Enter` | Edit the selected row (text box, picker, or toggle) |
+| `d` | Reset the selected Advanced row to its default |
+| `Ctrl+S` | Save, regenerate the cloudflared YAML and restart the daemon if it's running |
+| `Esc` | Cancel (asks first if there are unsaved changes) |
+
+Options are saved in `tunnels.toml` and written into the tunnel's generated cloudflared YAML, so you can open that file to see exactly what cloudflared is given.
+
+**Log mode** controls what the log panel shows:
+
+- `Default` - cloudflared's normal info-level output
+- `Debug` - cloudflared at debug level, including every request and response line
+- `ngrok-dev` - cloudflared at debug level, shown as one row per completed request: `HH:MM:SS  METHOD  path  STATUS  size`
 
 ### Metrics Panel
 

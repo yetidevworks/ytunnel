@@ -3,7 +3,8 @@
 ### v1.1.0
 
 - **Live log tail** - The log panel reads new lines from the log file every second, instead of only after start, stop or import
-- **Scrollable log panel** - `Tab` moves focus to the logs; then `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `Home`/`End` and the mouse wheel scroll through the last 5000 lines. The panel follows new lines until you scroll up, and stays put while you read. Long lines wrap without pushing the newest line out of view, and large log files open instantly because only the end is read. Mouse capture is only on while the logs have focus, so text selection works everywhere else
+- **Scrollable log panel** - `Tab` moves focus to the logs; then `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `Home`/`End` and the mouse wheel scroll through the last 5000 lines. The panel follows new lines until you scroll up, and stays put while you read. Long lines wrap without pushing the newest line out of view, and large log files open instantly because only the end is read
+- **Mouse support** - Click a pane to focus it and click a tunnel to select it. The mouse wheel scrolls whichever pane is under the pointer: the logs, or the tunnel selection. Mouse movement isn't reported, so it costs nothing. To select text, hold `Shift` while dragging (`Option` in Terminal.app)
 - **Log colours** - Debug lines are white instead of grey, and HTTP response lines are coloured by status class (2xx green, 3xx cyan, 4xx yellow, 5xx magenta)
 - **Brighter help bar** - The key hints at the bottom are white instead of dark grey
 

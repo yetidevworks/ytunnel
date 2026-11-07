@@ -210,10 +210,13 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `r` | Refresh status |
 | `↑/↓` or `j/k` | Navigate list (scroll logs when the log pane has focus) |
 | `Tab` | Switch focus between the tunnel list and the log pane |
+| Click | Focus a pane, or select a tunnel; the mouse wheel scrolls the pane under the pointer |
 | `PgUp/PgDn` | Scroll logs a page |
 | `Ctrl+U/Ctrl+D` | Scroll logs half a page |
 | `Home/End` | Jump to the oldest / newest log line (`End` resumes following) |
 | `q` | Quit |
+
+To select text in the TUI, hold `Shift` while dragging (`Option` in Terminal.app), since plain clicks go to ytunnel.
 
 Tunnels continue running in the background after you close the TUI.
 

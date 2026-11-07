@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, KeyCode,
+        KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -302,14 +302,57 @@ async fn edit_tunnel_op(
     Ok(name)
 }
 
-// Route a mouse event to the log pane. Mouse capture is only enabled while
-// focus is on Logs (see Tab handler), so any mouse event we receive here is
-// for scrolling the logs.
-fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+// Report mouse clicks and the wheel, but not movement. crossterm's
+// EnableMouseCapture also turns on all-motion tracking (?1003h), which would
+// send an event, and so a redraw, for every mouse move over the window.
+// ?1000h = button presses and wheel, ?1006h = SGR encoding (any column).
+// DisableMouseCapture turns these off again.
+struct EnableClickCapture;
+
+impl crossterm::Command for EnableClickCapture {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        crossterm::event::EnableMouseCapture.execute_winapi()
+    }
+}
+
+// Handle a mouse event in Normal mode. A left click focuses the pane under
+// the pointer (and selects the tunnel clicked on); the wheel scrolls the pane
+// under the pointer. Returns true when the selected tunnel changed, so the
+// caller can run the same health check as keyboard navigation.
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
+    let (col, row) = (mouse.column, mouse.row);
+    let over = |area: ratatui::layout::Rect| area.contains((col, row).into());
+    let tunnels = app.tunnels_area.get();
+    let logs = app.logs_area.get();
     match mouse.kind {
-        MouseEventKind::ScrollUp => app.scroll_logs_up(3),
-        MouseEventKind::ScrollDown => app.scroll_logs_down(3),
-        _ => {}
+        MouseEventKind::Down(MouseButton::Left) => {
+            if over(tunnels) {
+                app.focus = Focus::Tunnels;
+                // Rows inside the border map one-to-one to tunnels
+                if row > tunnels.y && row < tunnels.bottom().saturating_sub(1) {
+                    return app.select_index((row - tunnels.y - 1) as usize);
+                }
+            } else if over(logs) {
+                app.focus = Focus::Logs;
+            }
+            false
+        }
+        MouseEventKind::ScrollUp if over(logs) => {
+            app.scroll_logs_up(3);
+            false
+        }
+        MouseEventKind::ScrollDown if over(logs) => {
+            app.scroll_logs_down(3);
+            false
+        }
+        MouseEventKind::ScrollUp if over(tunnels) => app.select_previous(),
+        MouseEventKind::ScrollDown if over(tunnels) => app.select_next(),
+        _ => false,
     }
 }
 
@@ -656,6 +699,9 @@ pub struct App {
     // the current pane size, and the pane's height in rows (for paging)
     pub log_max_scroll: std::cell::Cell<usize>,
     pub log_page: std::cell::Cell<usize>,
+    // Where the tunnel list and log pane were last drawn, for mouse clicks
+    pub tunnels_area: std::cell::Cell<ratatui::layout::Rect>,
+    pub logs_area: std::cell::Cell<ratatui::layout::Rect>,
     // Input buffer for add dialog
     pub input: String,
     // Temporary storage for new tunnel name during add flow
@@ -747,6 +793,8 @@ impl App {
             log_follow: true,
             log_max_scroll: std::cell::Cell::new(0),
             log_page: std::cell::Cell::new(10),
+            tunnels_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
+            logs_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -805,6 +853,8 @@ impl App {
             log_follow: true,
             log_max_scroll: std::cell::Cell::new(0),
             log_page: std::cell::Cell::new(10),
+            tunnels_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
+            logs_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -1810,6 +1860,18 @@ impl App {
         false
     }
 
+    // Select a tunnel by index (mouse click). Returns true if it changed.
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index < self.tunnels.len() && index != self.selected {
+            self.selected = index;
+            self.log_scroll = 0;
+            self.log_follow = true;
+            self.refresh_logs();
+            return true;
+        }
+        false
+    }
+
     // Move selection down
     pub fn select_next(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
@@ -2250,9 +2312,14 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // Mouse capture starts OFF — text selection works with native drag.
-    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Mouse capture is on so panes can be clicked and scrolled; Shift+drag
+    // (Option+drag in Terminal.app) still selects text natively
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableClickCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2287,9 +2354,14 @@ pub async fn run_demo_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // Mouse capture starts OFF — text selection works with native drag.
-    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Mouse capture is on so panes can be clicked and scrolled; Shift+drag
+    // (Option+drag in Terminal.app) still selects text natively
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableClickCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2377,11 +2449,13 @@ async fn run_app(
                 continue;
             }
 
-            // Mouse events only arrive while the log pane has focus (capture
-            // is toggled by Tab), so route them to log scrolling.
             if let Event::Mouse(mouse) = &event {
-                if app.input_mode == InputMode::Normal {
-                    handle_mouse(app, *mouse);
+                if app.input_mode == InputMode::Normal
+                    && handle_mouse(app, *mouse)
+                    && !app.demo
+                    && app.selected_needs_health_check()
+                {
+                    app.check_health().await;
                 }
                 continue;
             }
@@ -2419,17 +2493,14 @@ async fn run_app(
                         }
                     }
 
-                    // When resumed, restore terminal. Mouse capture is only
-                    // re-enabled if focus is still on Logs.
+                    // When resumed, restore terminal
                     enable_raw_mode()?;
                     execute!(
                         terminal.backend_mut(),
                         EnterAlternateScreen,
-                        EnableBracketedPaste
+                        EnableBracketedPaste,
+                        EnableClickCapture
                     )?;
-                    if app.focus == Focus::Logs {
-                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
-                    }
                     // Force full redraw
                     terminal.clear()?;
                     continue;
@@ -2677,19 +2748,9 @@ async fn run_app(
                             app.input_mode = InputMode::Help;
                         }
                         KeyCode::Tab => {
-                            // Toggle focus AND terminal mouse capture: capture is
-                            // on only when Logs are focused, so users can drag to
-                            // select text in the terminal whenever focus is on
-                            // the tunnel list.
                             app.focus = match app.focus {
-                                Focus::Tunnels => {
-                                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
-                                    Focus::Logs
-                                }
-                                Focus::Logs => {
-                                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
-                                    Focus::Tunnels
-                                }
+                                Focus::Tunnels => Focus::Logs,
+                                Focus::Logs => Focus::Tunnels,
                             };
                         }
                         KeyCode::Up | KeyCode::Char('k') => match app.focus {
@@ -3144,5 +3205,90 @@ async fn run_app(
         if app.should_quit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use ratatui::backend::TestBackend;
+
+    // A demo app drawn once at 120x40 so the pane areas are known
+    fn drawn_demo() -> App {
+        let mut app = App::new_demo();
+        app.load_demo_tunnels();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| ui::render(f, &app)).unwrap();
+        app
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn click_focuses_the_pane_under_the_pointer() {
+        let mut app = drawn_demo();
+        let logs = app.logs_area.get();
+        let tunnels = app.tunnels_area.get();
+        let click = MouseEventKind::Down(MouseButton::Left);
+
+        handle_mouse(&mut app, mouse(click, logs.x + 5, logs.y + 3));
+        assert_eq!(app.focus, Focus::Logs);
+
+        // Clicking the tunnel list's border focuses it without changing selection
+        handle_mouse(&mut app, mouse(click, tunnels.x + 5, tunnels.y));
+        assert_eq!(app.focus, Focus::Tunnels);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn click_on_a_tunnel_selects_it() {
+        let mut app = drawn_demo();
+        let tunnels = app.tunnels_area.get();
+        let click = MouseEventKind::Down(MouseButton::Left);
+
+        // Third row inside the border is the third tunnel
+        assert!(handle_mouse(
+            &mut app,
+            mouse(click, tunnels.x + 3, tunnels.y + 3)
+        ));
+        assert_eq!(app.selected, 2);
+        // Clicking it again isn't a change
+        assert!(!handle_mouse(
+            &mut app,
+            mouse(click, tunnels.x + 3, tunnels.y + 3)
+        ));
+        // Empty rows below the last tunnel do nothing
+        assert!(!handle_mouse(
+            &mut app,
+            mouse(click, tunnels.x + 3, tunnels.y + 30)
+        ));
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn wheel_scrolls_the_pane_under_the_pointer() {
+        let mut app = drawn_demo();
+        let tunnels = app.tunnels_area.get();
+
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollDown, tunnels.x + 3, tunnels.y + 3)
+        ));
+        assert_eq!(app.selected, 1);
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollUp, tunnels.x + 3, tunnels.y + 3)
+        ));
+        assert_eq!(app.selected, 0);
+        // Focus doesn't move on scroll
+        assert_eq!(app.focus, Focus::Tunnels);
     }
 }

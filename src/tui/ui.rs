@@ -112,19 +112,6 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 fn render_help_modal(f: &mut Frame) {
-    let area = centered_rect(70, 80, f.area());
-
-    // Clear the area
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Help - Press Esc to close ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
     let help_text = vec![
         Line::from(Span::styled(
             "NAVIGATION",
@@ -152,6 +139,14 @@ fn render_help_modal(f: &mut Frame) {
         Line::from(vec![
             Span::styled("  Home/End ", Style::default().fg(Color::Cyan)),
             Span::raw("Oldest / newest log line (End resumes following)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mouse    ", Style::default().fg(Color::Cyan)),
+            Span::raw("Click a pane or tunnel; wheel scrolls the pane under the pointer"),
+        ]),
+        Line::from(vec![
+            Span::styled("           ", Style::default().fg(Color::Cyan)),
+            Span::raw("Shift+drag to select text (Option+drag in Terminal.app)"),
         ]),
         Line::from(vec![
             Span::styled("  q        ", Style::default().fg(Color::Cyan)),
@@ -255,12 +250,35 @@ fn render_help_modal(f: &mut Frame) {
         ]),
     ];
 
+    // As tall as the help text (plus borders), so nothing is cut off on a
+    // normal-sized terminal; a smaller one clips as before
+    let width_area = centered_rect(70, 100, f.area());
+    let height = (help_text.len() as u16 + 2).min(f.area().height);
+    let area = Rect {
+        x: width_area.x,
+        y: f.area().y + (f.area().height - height) / 2,
+        width: width_area.width,
+        height,
+    };
+
+    // Clear the area
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Help - Press Esc to close ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
     let help = Paragraph::new(help_text).wrap(Wrap { trim: false });
 
     f.render_widget(help, inner);
 }
 
 fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
+    app.tunnels_area.set(area);
     // Show account name in title if there are multiple accounts
     let title = if app.demo {
         format!(" Tunnels ({}) [demo] ", app.tunnels.len())
@@ -363,6 +381,7 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
+    app.logs_area.set(area);
     let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
     let tail = name.as_deref().and_then(|n| app.log_tails.get(n));
 

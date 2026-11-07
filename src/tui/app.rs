@@ -24,6 +24,9 @@ use crate::state::{write_tunnel_config, PersistentTunnel, TunnelState, TunnelSta
 
 use super::ui;
 
+// Lines kept per tunnel for the scrollable log pane
+const LOG_LINES: usize = 5000;
+
 // How long a Cloudflare tunnel listing stays good before we re-query. Tunnels
 // created elsewhere don't appear often, and `r` forces a refresh anyway.
 const DISCOVERY_TTL: Duration = Duration::from_secs(60);
@@ -644,10 +647,15 @@ pub struct App {
     pub selected: usize,
     // Per-tunnel byte-offset log tails (keyed by tunnel name)
     pub log_tails: HashMap<String, crate::tui::log_tail::LogTail>,
-    // Scroll offset from bottom of log buffer. 0 = follow bottom.
-    pub log_scroll: u16,
-    // True while log_scroll == 0 (auto-scroll to bottom on new lines).
+    // Lines scrolled up from the newest one. 0 = at the bottom.
+    pub log_scroll: usize,
+    // False once the user scrolls up: new lines then keep the view still
+    // instead of pulling it down. End (or scrolling back down) resumes.
     pub log_follow: bool,
+    // Written by the renderer each frame: the largest useful log_scroll for
+    // the current pane size, and the pane's height in rows (for paging)
+    pub log_max_scroll: std::cell::Cell<usize>,
+    pub log_page: std::cell::Cell<usize>,
     // Input buffer for add dialog
     pub input: String,
     // Temporary storage for new tunnel name during add flow
@@ -737,6 +745,8 @@ impl App {
             log_tails: HashMap::new(),
             log_scroll: 0,
             log_follow: true,
+            log_max_scroll: std::cell::Cell::new(0),
+            log_page: std::cell::Cell::new(10),
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -793,6 +803,8 @@ impl App {
             log_tails: HashMap::new(),
             log_scroll: 0,
             log_follow: true,
+            log_max_scroll: std::cell::Cell::new(0),
+            log_page: std::cell::Cell::new(10),
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -1083,14 +1095,12 @@ impl App {
             return;
         };
 
-        // Inject demo lines into the log_tails map so render_logs can read them.
+        // Demo lines go in a placeholder tail so render_logs can read them
         if let Some(entry) = self.tunnels.get(self.selected) {
-            let name = entry.tunnel.name.clone();
-            // Use a dummy path; seed() won't be called for demo tails.
-            let tail = self.log_tails.entry(name).or_insert_with(|| {
-                crate::tui::log_tail::LogTail::new(std::path::PathBuf::new(), 5000)
-            });
-            tail.inject_lines(lines);
+            self.log_tails.insert(
+                entry.tunnel.name.clone(),
+                crate::tui::log_tail::LogTail::placeholder(lines),
+            );
         }
     }
 
@@ -1526,25 +1536,33 @@ impl App {
             TunnelKind::External => Some(external_detail(entry)),
         };
         if let Some(lines) = info {
-            let tail = self.log_tails.entry(name).or_insert_with(|| {
-                crate::tui::log_tail::LogTail::new(std::path::PathBuf::new(), 5000)
-            });
-            tail.inject_lines(lines);
+            self.log_tails
+                .insert(name, crate::tui::log_tail::LogTail::placeholder(lines));
             return;
         }
-        let path = match entry.tunnel.log_path() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        match self.log_tails.entry(name) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                let _ = e.get_mut().poll();
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let mut tail = crate::tui::log_tail::LogTail::new(path, 5000);
-                let _ = tail.seed();
-                e.insert(tail);
-            }
+        if let Ok(path) = entry.tunnel.log_path() {
+            self.refresh_file_tail(name, path);
+        }
+    }
+
+    // Read new lines from a managed tunnel's log file into its tail
+    pub(crate) fn refresh_file_tail(&mut self, name: String, path: std::path::PathBuf) {
+        // Replace the tail if it isn't reading this file, e.g. a placeholder
+        // left from when this tunnel was ephemeral and has just been imported
+        let tail = self
+            .log_tails
+            .entry(name)
+            .and_modify(|t| {
+                if !t.is_file_tail_for(&path) {
+                    *t = crate::tui::log_tail::LogTail::new(path.clone(), LOG_LINES);
+                }
+            })
+            .or_insert_with(|| crate::tui::log_tail::LogTail::new(path.clone(), LOG_LINES));
+        let new_lines = tail.refresh();
+        // Scrolled up: move the offset by what arrived so the same lines stay
+        // in view (the renderer clamps it if they've left the buffer)
+        if !self.log_follow {
+            self.log_scroll = self.log_scroll.saturating_add(new_lines);
         }
     }
 
@@ -1804,18 +1822,27 @@ impl App {
         false
     }
 
-    // Scroll log view up (toward older lines)
-    pub fn scroll_logs_up(&mut self, n: u16) {
-        self.log_scroll = self.log_scroll.saturating_add(n);
-        self.log_follow = false;
+    // Scroll log view up (toward older lines), stopping at the top
+    pub fn scroll_logs_up(&mut self, n: usize) {
+        let max = self.log_max_scroll.get();
+        self.log_scroll = self.log_scroll.min(max).saturating_add(n).min(max);
+        self.log_follow = self.log_scroll == 0;
     }
 
-    // Scroll log view down (toward newer lines)
-    pub fn scroll_logs_down(&mut self, n: u16) {
-        self.log_scroll = self.log_scroll.saturating_sub(n);
+    // Scroll log view down (toward newer lines); reaching the bottom resumes following
+    pub fn scroll_logs_down(&mut self, n: usize) {
+        self.log_scroll = self
+            .log_scroll
+            .min(self.log_max_scroll.get())
+            .saturating_sub(n);
         if self.log_scroll == 0 {
             self.log_follow = true;
         }
+    }
+
+    // A page is the pane's height less one row, so a line of context carries over
+    pub fn log_page_size(&self) -> usize {
+        self.log_page.get().saturating_sub(1).max(1)
     }
 
     // Jump to the bottom (newest) line and re-enable auto-follow
@@ -1824,10 +1851,10 @@ impl App {
         self.log_follow = true;
     }
 
-    // Jump to the top (oldest) line; render clamps to actual buffer size
+    // Jump to the top (oldest) line
     pub fn scroll_logs_top(&mut self) {
-        self.log_scroll = u16::MAX;
-        self.log_follow = false;
+        self.log_scroll = self.log_max_scroll.get();
+        self.log_follow = self.log_scroll == 0;
     }
 
     // Check if selected tunnel needs a health check (unknown or stale)
@@ -2539,7 +2566,7 @@ async fn run_app(
                         }
                         KeyCode::Char('d') => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                app.scroll_logs_down(5);
+                                app.scroll_logs_down(app.log_page_size() / 2 + 1);
                             } else if !app.demo_guard() {
                                 app.request_delete();
                             }
@@ -2703,12 +2730,12 @@ async fn run_app(
                                 app.status_message = Some(format!("Error: {}", e));
                             }
                         }
-                        KeyCode::PageUp => app.scroll_logs_up(10),
-                        KeyCode::PageDown => app.scroll_logs_down(10),
+                        KeyCode::PageUp => app.scroll_logs_up(app.log_page_size()),
+                        KeyCode::PageDown => app.scroll_logs_down(app.log_page_size()),
                         KeyCode::Home => app.scroll_logs_top(),
                         KeyCode::End => app.scroll_logs_bottom(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.scroll_logs_up(5);
+                            app.scroll_logs_up(app.log_page_size() / 2 + 1);
                         }
                         _ => {}
                     },

@@ -9,6 +9,7 @@ use ratatui::{
 use super::app::{App, Focus, HealthStatus, InputMode, TunnelKind};
 use crate::metrics::TunnelMetrics;
 use crate::state::TunnelStatus;
+use unicode_width::UnicodeWidthChar;
 
 pub fn render(f: &mut Frame, app: &App) {
     // Main layout: tunnels on left, logs/metrics on right, status line, help bar at bottom
@@ -143,6 +144,14 @@ fn render_help_modal(f: &mut Frame) {
         Line::from(vec![
             Span::styled("  ↓/j      ", Style::default().fg(Color::Cyan)),
             Span::raw("Move selection down (or scroll logs when log pane focused)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  PgUp/Dn  ", Style::default().fg(Color::Cyan)),
+            Span::raw("Scroll logs a page (Ctrl+U/Ctrl+D: half a page)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Home/End ", Style::default().fg(Color::Cyan)),
+            Span::raw("Oldest / newest log line (End resumes following)"),
         ]),
         Line::from(vec![
             Span::styled("  q        ", Style::default().fg(Color::Cyan)),
@@ -355,49 +364,127 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
+    let tail = name.as_deref().and_then(|n| app.log_tails.get(n));
 
-    let all_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
-        Some(tail) if !tail.is_empty() => tail.lines().map(String::from).collect(),
-        Some(_) => vec!["No logs yet".to_string()],
-        None => vec!["No tunnel selected".to_string()],
+    // What to show: the tail's lines, or a one-line message
+    let message = match tail {
+        Some(t) if !t.is_empty() => None,
+        Some(t) => Some(match &t.error {
+            Some(e) => format!("Error reading logs: {}", e),
+            None => "No logs yet".to_string(),
+        }),
+        None => Some("No tunnel selected".to_string()),
+    };
+    let total = match (&message, tail) {
+        (None, Some(t)) => t.len(),
+        _ => 1,
+    };
+    let line_at = |i: usize| -> &str {
+        match (&message, tail) {
+            (None, Some(t)) => t.line(i),
+            (Some(m), _) => m.as_str(),
+            _ => "",
+        }
     };
 
-    // Determine visible slice based on scroll offset.
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let total = all_lines.len();
-    let scroll = (app.log_scroll as usize).min(total.saturating_sub(1));
-    let end = total.saturating_sub(scroll);
-    let start = end.saturating_sub(visible_height);
-    let visible = &all_lines[start..end];
+    let width = area.width.saturating_sub(2) as usize;
+    let height = area.height.saturating_sub(2) as usize;
 
-    let log_lines: Vec<Line> = visible
-        .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), raw_line_style(l))))
-        .collect();
+    // Largest useful scroll: the offset at which the oldest line reaches the
+    // top of the pane. 0 when everything fits.
+    let mut rows = 0;
+    let mut first_page_lines = 0;
+    while first_page_lines < total && rows < height {
+        rows += wrapped_row_count(line_at(first_page_lines), width);
+        first_page_lines += 1;
+    }
+    let max_scroll = if rows < height {
+        0
+    } else {
+        total - first_page_lines
+    };
+    app.log_max_scroll.set(max_scroll);
+    app.log_page.set(height);
+    let scroll = app.log_scroll.min(max_scroll);
+
+    // Lines are wrapped here rather than by the Paragraph, so the row count is
+    // exact and the newest line is never pushed off the bottom
+    let mut visible: Vec<Line> = Vec::with_capacity(height);
+    if height > 0 && width > 0 {
+        if scroll > 0 && scroll == max_scroll {
+            // At the top: start from the first row of the oldest line
+            'top: for i in 0..total {
+                let line = line_at(i);
+                let style = raw_line_style(line);
+                for row in wrap_rows(line, width) {
+                    if visible.len() == height {
+                        break 'top;
+                    }
+                    visible.push(Line::from(Span::styled(row.to_string(), style)));
+                }
+            }
+        } else {
+            // Bottom-anchored: fill upward from the newest line in view
+            let bottom = total - 1 - scroll;
+            'bottom: for i in (0..=bottom).rev() {
+                let line = line_at(i);
+                let style = raw_line_style(line);
+                for row in wrap_rows(line, width).into_iter().rev() {
+                    if visible.len() == height {
+                        break 'bottom;
+                    }
+                    visible.push(Line::from(Span::styled(row.to_string(), style)));
+                }
+            }
+            visible.reverse();
+        }
+    }
 
     let name_tag = name
         .as_deref()
         .map(|n| format!(": {}", n))
         .unwrap_or_default();
-    let title = if app.log_follow {
-        format!(" Logs{} ({}) ", name_tag, total)
+    let count = if message.is_some() { 0 } else { total };
+    let title = if scroll == 0 {
+        format!(" Logs{} ({}) ", name_tag, count)
     } else {
-        format!(" Logs{} ({} — scrolled, End to follow) ", name_tag, total)
+        format!(" Logs{} ({} — scrolled, End to follow) ", name_tag, count)
     };
     let logs_border_style = if app.focus == Focus::Logs {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let logs = Paragraph::new(log_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(logs_border_style)
-                .title(title),
-        )
-        .wrap(Wrap { trim: false });
+    let logs = Paragraph::new(visible).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(logs_border_style)
+            .title(title),
+    );
     f.render_widget(logs, area);
+}
+
+// Split a line into rows of at most `width` display columns (character
+// wrapping, like a terminal). An empty line is one empty row.
+fn wrap_rows(line: &str, width: usize) -> Vec<&str> {
+    let mut rows = Vec::new();
+    let mut row_start = 0;
+    let mut row_width = 0;
+    for (i, c) in line.char_indices() {
+        let w = c.width().unwrap_or(0);
+        if row_width + w > width && row_width > 0 {
+            rows.push(&line[row_start..i]);
+            row_start = i;
+            row_width = 0;
+        }
+        row_width += w;
+    }
+    rows.push(&line[row_start..]);
+    rows
+}
+
+fn wrapped_row_count(line: &str, width: usize) -> usize {
+    wrap_rows(line, width).len()
 }
 
 // Color raw cloudflared lines by level marker (ERR red, WRN yellow, INF
@@ -937,4 +1024,126 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::log_tail::LogTail;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn wrap_rows_splits_by_width() {
+        assert_eq!(wrap_rows("", 4), vec![""]);
+        assert_eq!(wrap_rows("abcd", 4), vec!["abcd"]);
+        assert_eq!(wrap_rows("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Wide characters take two columns
+        assert_eq!(wrap_rows("ab界cd", 4), vec!["ab界", "cd"]);
+    }
+
+    // A demo app whose selected tunnel has `n` numbered log lines
+    fn app_with_lines(n: usize) -> App {
+        let mut app = App::new_demo();
+        app.load_demo_tunnels();
+        let name = app.tunnels[app.selected].tunnel.name.clone();
+        let lines = (0..n).map(|i| format!("line {:04}", i)).collect();
+        app.log_tails.insert(name, LogTail::placeholder(lines));
+        app
+    }
+
+    // Render the log pane alone into a 40x12 buffer (10 rows inside the
+    // border) and return its inner rows, trimmed
+    fn draw(app: &App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| render_logs(f, app, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (1..11)
+            .map(|y| {
+                (1..39)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn follows_the_newest_line() {
+        let app = app_with_lines(100);
+        let rows = draw(&app);
+        assert_eq!(rows.first().unwrap(), "line 0090");
+        assert_eq!(rows.last().unwrap(), "line 0099");
+    }
+
+    #[test]
+    fn home_shows_a_full_first_page_and_paging_back_works() {
+        let mut app = app_with_lines(100);
+        draw(&app);
+        app.scroll_logs_top();
+        let rows = draw(&app);
+        assert_eq!(rows.first().unwrap(), "line 0000");
+        assert_eq!(rows.last().unwrap(), "line 0009");
+
+        // Extra scrolling up does not build up past the top
+        app.scroll_logs_up(500);
+        app.scroll_logs_down(app.log_page_size());
+        let rows = draw(&app);
+        assert_eq!(rows.first().unwrap(), "line 0009");
+    }
+
+    #[test]
+    fn scrolling_does_nothing_when_everything_fits() {
+        let mut app = app_with_lines(5);
+        draw(&app);
+        app.scroll_logs_up(3);
+        assert_eq!(app.log_scroll, 0);
+        assert!(app.log_follow);
+        assert_eq!(draw(&app).first().unwrap(), "line 0000");
+    }
+
+    #[test]
+    fn long_lines_wrap_without_hiding_the_newest_line() {
+        let mut app = App::new_demo();
+        app.load_demo_tunnels();
+        let name = app.tunnels[app.selected].tunnel.name.clone();
+        let mut lines: Vec<String> = (0..20).map(|i| format!("line {:04}", i)).collect();
+        lines.push("x".repeat(100)); // 3 rows at width 38
+        lines.push("newest".into());
+        app.log_tails.insert(name, LogTail::placeholder(lines));
+        let rows = draw(&app);
+        assert_eq!(rows.last().unwrap(), "newest");
+        assert_eq!(rows[rows.len() - 2], "x".repeat(24));
+    }
+
+    #[test]
+    fn file_tail_replaces_placeholder_and_scrolled_view_stays_put() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..50 {
+            writeln!(f, "line {:04}", i).unwrap();
+        }
+
+        // A placeholder from when the tunnel was ephemeral is swapped for the file
+        let mut app = app_with_lines(3);
+        let name = app.tunnels[app.selected].tunnel.name.clone();
+        app.refresh_file_tail(name.clone(), path.clone());
+        assert_eq!(draw(&app).last().unwrap(), "line 0049");
+
+        // Scrolled up, new lines arriving don't move the view
+        app.scroll_logs_up(5);
+        let before = draw(&app);
+        assert_eq!(before.last().unwrap(), "line 0044");
+        for i in 50..53 {
+            writeln!(f, "line {:04}", i).unwrap();
+        }
+        app.refresh_file_tail(name.clone(), path.clone());
+        assert_eq!(draw(&app), before);
+
+        // End resumes following
+        app.scroll_logs_bottom();
+        assert_eq!(draw(&app).last().unwrap(), "line 0052");
+    }
 }

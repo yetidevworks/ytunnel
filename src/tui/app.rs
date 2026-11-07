@@ -168,6 +168,9 @@ async fn create_tunnel_op(
         enabled: true,
         auto_start: false,
         metrics_port: None,
+        tunnel_options: std::collections::BTreeMap::new(),
+        origin_request: std::collections::BTreeMap::new(),
+        log_mode: crate::state::LogMode::Default,
     };
 
     // Write tunnel config
@@ -215,6 +218,9 @@ async fn import_tunnel_op(
         enabled: true,
         auto_start: false,
         metrics_port: None,
+        tunnel_options: std::collections::BTreeMap::new(),
+        origin_request: std::collections::BTreeMap::new(),
+        log_mode: crate::state::LogMode::Default,
     };
 
     // Write tunnel config
@@ -922,6 +928,9 @@ impl App {
                 enabled: status == TunnelStatus::Running,
                 auto_start,
                 metrics_port: None,
+                tunnel_options: std::collections::BTreeMap::new(),
+                origin_request: std::collections::BTreeMap::new(),
+                log_mode: crate::state::LogMode::Default,
             };
 
             // Build pre-seeded metrics for running managed tunnels
@@ -1303,6 +1312,9 @@ impl App {
                         enabled: false,
                         auto_start: false,
                         metrics_port: None,
+                        tunnel_options: std::collections::BTreeMap::new(),
+                        origin_request: std::collections::BTreeMap::new(),
+                        log_mode: crate::state::LogMode::Default,
                     },
                     // Cloudflare's own view is the only status we have
                     status: if cf_tunnel.is_connected() {
@@ -1357,6 +1369,9 @@ impl App {
                     enabled: false,
                     auto_start: false,
                     metrics_port: None,
+                    tunnel_options: std::collections::BTreeMap::new(),
+                    origin_request: std::collections::BTreeMap::new(),
+                    log_mode: crate::state::LogMode::Default,
                 },
                 status: if config_exists {
                     TunnelStatus::Running
@@ -2144,6 +2159,9 @@ impl App {
             enabled: true,
             auto_start: false,
             metrics_port: None,
+            tunnel_options: std::collections::BTreeMap::new(),
+            origin_request: std::collections::BTreeMap::new(),
+            log_mode: crate::state::LogMode::Default,
         };
 
         // Write tunnel config for daemon

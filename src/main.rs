@@ -1,5 +1,6 @@
 mod cli;
 mod cloudflare;
+mod cloudflared_options;
 mod config;
 mod daemon;
 mod metrics;
@@ -547,6 +548,9 @@ async fn cmd_add(
         enabled: start,
         auto_start: false,
         metrics_port: None,
+        tunnel_options: std::collections::BTreeMap::new(),
+        origin_request: std::collections::BTreeMap::new(),
+        log_mode: crate::state::LogMode::Default,
     };
 
     // Write tunnel config

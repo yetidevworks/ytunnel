@@ -233,7 +233,7 @@ For running tunnels, the TUI displays live metrics from cloudflared's Prometheus
 - **Status Codes** - Breakdown of HTTP response codes
 - **Traffic** - Sparkline showing request rate over time
 
-Metrics auto-refresh every 5 seconds. Health checks run every 30 seconds. Use `h` for immediate health check.
+Metrics auto-refresh every 5 seconds. Health checks run every 30 seconds, and `h` runs one immediately. A tunnel is only marked unreachable (and a notification sent) after 3 failed checks in a row, so a brief network drop doesn't produce a down/up pair. When every tunnel fails in the same check, ytunnel reports this machine as offline instead of marking each tunnel down, and sends one notification if it lasts through 3 checks.
 
 ### Notifications
 

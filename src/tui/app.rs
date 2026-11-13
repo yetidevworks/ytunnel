@@ -31,6 +31,15 @@ const LOG_LINES: usize = 5000;
 // created elsewhere don't appear often, and `r` forces a refresh anyway.
 const DISCOVERY_TTL: Duration = Duration::from_secs(60);
 
+// Consecutive failed probes before a tunnel is reported down. With a probe
+// every 30 seconds that's about 90 seconds, long enough to ride out a Wi-Fi
+// or DNS blip on this machine without a down/up notification pair.
+const HEALTH_FAILS_TO_DOWN: u32 = 3;
+
+// How long one probe may take. The request goes out through Cloudflare's edge
+// and back to the local origin, and a cold PHP site can be slow to answer.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
+
 // Turn an HTTP probe result into a health verdict
 fn classify_health(result: reqwest::Result<reqwest::Response>) -> HealthStatus {
     match result {
@@ -748,6 +757,15 @@ pub struct App {
     // Background discovery results arrive here
     discovery_tx: mpsc::UnboundedSender<DiscoveryResult>,
     discovery_rx: mpsc::UnboundedReceiver<DiscoveryResult>,
+    // Consecutive failed health probes per tunnel name. Cleared by a success.
+    health_fails: HashMap<String, u32>,
+    // Consecutive periodic rounds in which no tunnel answered at all
+    offline_rounds: u32,
+    // Tunnels with a health probe currently running
+    health_in_flight: HashSet<String>,
+    // Background health probe results arrive here
+    health_tx: mpsc::UnboundedSender<HealthRound>,
+    health_rx: mpsc::UnboundedReceiver<HealthRound>,
     // Which pane has keyboard focus in Normal mode.
     pub focus: Focus,
 }
@@ -756,6 +774,15 @@ pub struct App {
 struct DiscoveryResult {
     account_name: String,
     tunnels: Result<Vec<cloudflare::Tunnel>>,
+}
+
+// Outcome of one batch of health probes, keyed by tunnel name since the
+// tunnel list can change while the probes run
+struct HealthRound {
+    results: Vec<(String, HealthStatus)>,
+    // Started by the user (h, or selecting an unchecked tunnel) rather than
+    // the 30-second timer
+    manual: bool,
 }
 
 // Actions that require confirmation
@@ -783,6 +810,7 @@ impl App {
         };
 
         let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
+        let (health_tx, health_rx) = mpsc::unbounded_channel();
 
         Self {
             input_mode: InputMode::Normal,
@@ -818,6 +846,11 @@ impl App {
             discovery_in_flight: HashSet::new(),
             discovery_tx,
             discovery_rx,
+            health_fails: HashMap::new(),
+            offline_rounds: 0,
+            health_in_flight: HashSet::new(),
+            health_tx,
+            health_rx,
             focus: Focus::Tunnels,
         }
     }
@@ -843,6 +876,7 @@ impl App {
         };
 
         let (discovery_tx, discovery_rx) = mpsc::unbounded_channel();
+        let (health_tx, health_rx) = mpsc::unbounded_channel();
 
         Self {
             input_mode: InputMode::Normal,
@@ -878,6 +912,11 @@ impl App {
             discovery_in_flight: HashSet::new(),
             discovery_tx,
             discovery_rx,
+            health_fails: HashMap::new(),
+            offline_rounds: 0,
+            health_in_flight: HashSet::new(),
+            health_tx,
+            health_rx,
             focus: Focus::Tunnels,
         }
     }
@@ -1635,36 +1674,64 @@ impl App {
         }
     }
 
-    // Check health of the selected tunnel by making an HTTP request
-    pub async fn check_health(&mut self) {
+    // Check health of the selected tunnel (h, or selecting an unchecked one)
+    pub fn check_health(&mut self) {
         if self.demo {
             return;
         }
-        self.check_health_for_index(self.selected).await;
+        let Some(entry) = self.tunnels.get_mut(self.selected) else {
+            return;
+        };
+
+        // No hostname means nothing to probe (external tunnels)
+        if entry.tunnel.hostname.is_empty() {
+            entry.health = HealthStatus::Unknown;
+            self.status_message = Some(unmanaged_message(entry, "health check"));
+            return;
+        }
+
+        if entry.status != TunnelStatus::Running {
+            entry.health = HealthStatus::Unknown;
+            let name = entry.tunnel.name.clone();
+            self.health_fails.remove(&name);
+            self.status_message = Some("Tunnel not running".to_string());
+            return;
+        }
+
+        let name = entry.tunnel.name.clone();
+        let hostname = entry.tunnel.hostname.clone();
+        self.status_message = Some(format!("Checking health of {}...", name));
+        self.spawn_health_probes(vec![(name, hostname)], true);
     }
 
-    // Check health of all running tunnels. Probes run concurrently: done one at
-    // a time this cost a round trip per tunnel and froze the UI for the total.
-    pub async fn check_all_health(&mut self) {
+    // Check health of all running tunnels (the 30-second timer)
+    pub fn check_all_health(&mut self) {
         if self.demo {
             return;
         }
-
-        // (index, hostname, health before the check)
-        let targets: Vec<(usize, String, HealthStatus)> = self
+        let targets: Vec<(String, String)> = self
             .tunnels
             .iter()
-            .enumerate()
-            .filter(|(_, e)| e.status == TunnelStatus::Running && !e.tunnel.hostname.is_empty())
-            .map(|(i, e)| (i, e.tunnel.hostname.clone(), e.health))
+            .filter(|e| e.status == TunnelStatus::Running && !e.tunnel.hostname.is_empty())
+            .map(|e| (e.tunnel.name.clone(), e.tunnel.hostname.clone()))
             .collect();
+        self.spawn_health_probes(targets, false);
+    }
 
+    // Probe (name, hostname) pairs in the background, all at once, and send
+    // the batch back as one round. Awaiting them here would freeze the UI for
+    // up to HEALTH_TIMEOUT whenever the network is down.
+    fn spawn_health_probes(&mut self, targets: Vec<(String, String)>, manual: bool) {
+        let targets: Vec<(String, String)> = targets
+            .into_iter()
+            .filter(|(name, _)| !self.health_in_flight.contains(name))
+            .collect();
         if targets.is_empty() {
             return;
         }
 
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(HEALTH_TIMEOUT)
             .danger_accept_invalid_certs(true) // In case of self-signed certs
             .build()
         {
@@ -1672,113 +1739,127 @@ impl App {
             Err(_) => return,
         };
 
-        let mut handles = Vec::new();
-        for (index, hostname, _) in &targets {
-            let client = client.clone();
-            let url = format!("https://{}", hostname);
-            let index = *index;
-            handles.push(tokio::spawn(async move {
-                (index, classify_health(client.head(&url).send().await))
-            }));
+        for (name, _) in &targets {
+            self.health_in_flight.insert(name.clone());
         }
+        let tx = self.health_tx.clone();
 
-        for (handle, (_, _, previous)) in handles.into_iter().zip(targets.iter()) {
-            let Ok((index, health)) = handle.await else {
-                continue;
-            };
-            let Some(entry) = self.tunnels.get_mut(index) else {
-                continue;
-            };
-            entry.health = health;
-            let name = entry.tunnel.name.clone();
-            self.show_health_result(&name, *previous, health);
+        tokio::spawn(async move {
+            let handles: Vec<_> = targets
+                .into_iter()
+                .map(|(name, hostname)| {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let url = format!("https://{}", hostname);
+                        (name, classify_health(client.head(&url).send().await))
+                    })
+                })
+                .collect();
+
+            let mut results = Vec::new();
+            for handle in handles {
+                if let Ok(result) = handle.await {
+                    results.push(result);
+                }
+            }
+            // A send failure just means the TUI exited first
+            tx.send(HealthRound { results, manual }).ok();
+        });
+    }
+
+    // Fold in any finished health probes
+    pub fn poll_health(&mut self) {
+        while let Ok(round) = self.health_rx.try_recv() {
+            for (name, _) in &round.results {
+                self.health_in_flight.remove(name);
+            }
+            self.apply_health_round(round);
         }
     }
 
-    // Check health for a specific tunnel by index
-    async fn check_health_for_index(&mut self, index: usize) {
-        if let Some(entry) = self.tunnels.get_mut(index) {
-            // No hostname means nothing to probe (external tunnels)
-            if entry.tunnel.hostname.is_empty() {
-                entry.health = HealthStatus::Unknown;
-                if index == self.selected {
-                    self.status_message = Some(unmanaged_message(entry, "health check"));
-                }
-                return;
+    fn apply_health_round(&mut self, round: HealthRound) {
+        // Every tunnel failing in the same round points at this machine's
+        // network (the probes go out from here too), not at the tunnels. Leave
+        // each tunnel's state alone and report it once, as one problem.
+        let all_failed = !round.manual
+            && round.results.len() > 1
+            && round
+                .results
+                .iter()
+                .all(|(_, h)| *h == HealthStatus::Unhealthy);
+
+        if all_failed {
+            self.offline_rounds += 1;
+            if self.offline_rounds == HEALTH_FAILS_TO_DOWN {
+                self.send_system_notification(
+                    "Tunnels unreachable",
+                    "None of the tunnels answered. Check this machine's network connection.",
+                );
             }
+            self.status_message = Some(
+                "⚠ No tunnel answered. This machine may be offline, rechecking in 30s".to_string(),
+            );
+            return;
+        }
 
-            if entry.status != TunnelStatus::Running {
-                entry.health = HealthStatus::Unknown;
-                if index == self.selected {
-                    self.status_message = Some("Tunnel not running".to_string());
-                }
-                return;
-            }
+        if self.offline_rounds >= HEALTH_FAILS_TO_DOWN {
+            self.status_message = Some("✓ Tunnels are reachable again".to_string());
+            self.send_system_notification("Tunnels reachable", "The tunnels are answering again");
+        }
+        self.offline_rounds = 0;
 
-            let previous_health = entry.health;
-            let tunnel_name = entry.tunnel.name.clone();
-            let hostname = entry.tunnel.hostname.clone();
-            let is_selected = index == self.selected;
-
-            entry.health = HealthStatus::Checking;
-            if is_selected {
-                self.status_message = Some(format!("Checking health of {}...", tunnel_name));
-            }
-
-            let url = format!("https://{}", hostname);
-
-            // Simple HTTP HEAD request with short timeout
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .danger_accept_invalid_certs(true) // In case of self-signed certs
-                .build();
-
-            let result = match client {
-                Ok(c) => c.head(&url).send().await,
-                Err(_) => {
-                    if let Some(entry) = self.tunnels.get_mut(index) {
-                        entry.health = HealthStatus::Unhealthy;
-                    }
-                    self.show_health_result(&tunnel_name, previous_health, HealthStatus::Unhealthy);
-                    return;
-                }
-            };
-
-            let new_health = classify_health(result);
-
-            if let Some(entry) = self.tunnels.get_mut(index) {
-                entry.health = new_health;
-            }
-            self.show_health_result(&tunnel_name, previous_health, new_health);
+        for (name, probe) in round.results {
+            self.record_probe(&name, probe, round.manual);
         }
     }
 
-    // Show health check result and send notifications for state changes
-    fn show_health_result(&mut self, tunnel_name: &str, old: HealthStatus, new: HealthStatus) {
-        // Always show the result in status bar
-        match new {
-            HealthStatus::Healthy => {
-                self.status_message = Some(format!("✓ {} is healthy", tunnel_name));
-            }
-            HealthStatus::Unhealthy => {
-                self.status_message = Some(format!("✗ {} is unreachable", tunnel_name));
-            }
-            _ => {}
+    // Apply one probe result to a tunnel. A success counts at once; a failure
+    // only marks the tunnel down after HEALTH_FAILS_TO_DOWN in a row.
+    fn record_probe(&mut self, name: &str, probe: HealthStatus, manual: bool) {
+        let Some(entry) = self.tunnels.iter_mut().find(|e| e.tunnel.name == name) else {
+            return;
+        };
+        let old = entry.health;
+
+        let fails = if probe == HealthStatus::Unhealthy {
+            let n = self.health_fails.entry(name.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        } else {
+            self.health_fails.remove(name);
+            0
+        };
+
+        let new = match probe {
+            HealthStatus::Unhealthy if fails < HEALTH_FAILS_TO_DOWN => old,
+            other => other,
+        };
+        entry.health = new;
+
+        if manual {
+            self.status_message = Some(match probe {
+                HealthStatus::Healthy => format!("✓ {} is healthy", name),
+                _ if new == HealthStatus::Unhealthy => format!("✗ {} is unreachable", name),
+                _ => format!(
+                    "✗ {} didn't answer ({} of {} failed checks before it's marked down)",
+                    name, fails, HEALTH_FAILS_TO_DOWN
+                ),
+            });
         }
 
-        // Send system notification only on meaningful transitions
+        // Notify only on a confirmed change
         match (old, new) {
             (HealthStatus::Healthy, HealthStatus::Unhealthy) => {
-                self.status_message = Some(format!("⚠️  Tunnel '{}' is DOWN!", tunnel_name));
+                self.status_message = Some(format!("⚠️  Tunnel '{}' is DOWN!", name));
                 self.send_system_notification(
-                    &format!("Tunnel Down: {}", tunnel_name),
+                    &format!("Tunnel Down: {}", name),
                     "The tunnel is no longer reachable",
                 );
             }
             (HealthStatus::Unhealthy, HealthStatus::Healthy) => {
-                self.status_message = Some(format!("✓ Tunnel '{}' is back UP", tunnel_name));
+                self.status_message = Some(format!("✓ Tunnel '{}' is back UP", name));
                 self.send_system_notification(
-                    &format!("Tunnel Up: {}", tunnel_name),
+                    &format!("Tunnel Up: {}", name),
                     "The tunnel is now reachable",
                 );
             }
@@ -1789,6 +1870,11 @@ impl App {
     // Send a system notification
     fn send_system_notification(&self, title: &str, message: &str) {
         use std::process::Command;
+
+        // Demo data (and the tests built on it) never reaches the desktop
+        if self.demo {
+            return;
+        }
 
         #[cfg(target_os = "macos")]
         {
@@ -1820,10 +1906,17 @@ impl App {
 
     // Get health status for the selected tunnel
     pub fn selected_health(&self) -> HealthStatus {
-        self.tunnels
-            .get(self.selected)
-            .map(|e| e.health)
-            .unwrap_or(HealthStatus::Unknown)
+        match self.tunnels.get(self.selected) {
+            // A first probe still running reads as "checking"
+            Some(e)
+                if e.health == HealthStatus::Unknown
+                    && self.health_in_flight.contains(&e.tunnel.name) =>
+            {
+                HealthStatus::Checking
+            }
+            Some(e) => e.health,
+            None => HealthStatus::Unknown,
+        }
     }
 
     // Get metrics for the selected tunnel
@@ -1927,6 +2020,10 @@ impl App {
                 e.status == TunnelStatus::Running
                     && e.health == HealthStatus::Unknown
                     && !e.tunnel.hostname.is_empty()
+                    // Never probed: not already running, and no failures
+                    // pending that the 30-second timer will follow up on
+                    && !self.health_in_flight.contains(&e.tunnel.name)
+                    && !self.health_fails.contains_key(&e.tunnel.name)
             })
             .unwrap_or(false)
     }
@@ -2405,6 +2502,9 @@ async fn run_app(
         // Fold in any background Cloudflare discovery that finished
         app.poll_discovery();
 
+        // Fold in any background health probes that finished
+        app.poll_health();
+
         // Tick spinner animation
         app.spinner.tick();
 
@@ -2416,7 +2516,7 @@ async fn run_app(
 
         // Check health of all running tunnels less frequently (skip if spinner is active)
         if !app.spinner.is_active() && last_health_check.elapsed() >= health_check_interval {
-            app.check_all_health().await;
+            app.check_all_health();
             last_health_check = std::time::Instant::now();
         }
 
@@ -2455,7 +2555,7 @@ async fn run_app(
                     && !app.demo
                     && app.selected_needs_health_check()
                 {
-                    app.check_health().await;
+                    app.check_health();
                 }
                 continue;
             }
@@ -2664,7 +2764,7 @@ async fn run_app(
                                 } else {
                                     app.status_message = Some("Refreshed".to_string());
                                     if app.selected_needs_health_check() {
-                                        app.check_health().await;
+                                        app.check_health();
                                     }
                                 }
                             }
@@ -2734,7 +2834,7 @@ async fn run_app(
                         }
                         KeyCode::Char('h') => {
                             if !app.demo_guard() {
-                                app.check_health().await;
+                                app.check_health();
                             }
                         }
                         KeyCode::Char('A') => {
@@ -2759,7 +2859,7 @@ async fn run_app(
                                     && !app.demo
                                     && app.selected_needs_health_check()
                                 {
-                                    app.check_health().await;
+                                    app.check_health();
                                 }
                             }
                             Focus::Logs => {
@@ -2772,7 +2872,7 @@ async fn run_app(
                                     && !app.demo
                                     && app.selected_needs_health_check()
                                 {
-                                    app.check_health().await;
+                                    app.check_health();
                                 }
                             }
                             Focus::Logs => {
@@ -3290,5 +3390,119 @@ mod tests {
         assert_eq!(app.selected, 0);
         // Focus doesn't move on scroll
         assert_eq!(app.focus, Focus::Tunnels);
+    }
+
+    fn round(results: &[(&str, HealthStatus)], manual: bool) -> HealthRound {
+        HealthRound {
+            results: results.iter().map(|(n, h)| (n.to_string(), *h)).collect(),
+            manual,
+        }
+    }
+
+    fn health_of(app: &App, name: &str) -> HealthStatus {
+        app.tunnels
+            .iter()
+            .find(|e| e.tunnel.name == name)
+            .unwrap()
+            .health
+    }
+
+    #[test]
+    fn one_failed_probe_does_not_mark_a_tunnel_down() {
+        let mut app = drawn_demo();
+        let a = app.tunnels[0].tunnel.name.clone();
+        let b = app.tunnels[1].tunnel.name.clone();
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
+            false,
+        ));
+
+        // Two failures stay healthy, the third confirms it
+        for _ in 1..HEALTH_FAILS_TO_DOWN {
+            app.apply_health_round(round(
+                &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Healthy)],
+                false,
+            ));
+            assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+        }
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Healthy)],
+            false,
+        ));
+        assert_eq!(health_of(&app, &a), HealthStatus::Unhealthy);
+
+        // One success brings it straight back
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
+            false,
+        ));
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+        assert!(!app.health_fails.contains_key(&a));
+    }
+
+    #[test]
+    fn a_success_resets_the_failure_count() {
+        let mut app = drawn_demo();
+        let a = app.tunnels[0].tunnel.name.clone();
+        let b = app.tunnels[1].tunnel.name.clone();
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
+            false,
+        ));
+
+        // fail, fail, ok, fail, fail never reaches three in a row
+        for probe in [
+            HealthStatus::Unhealthy,
+            HealthStatus::Unhealthy,
+            HealthStatus::Healthy,
+            HealthStatus::Unhealthy,
+            HealthStatus::Unhealthy,
+        ] {
+            app.apply_health_round(round(&[(&a, probe), (&b, HealthStatus::Healthy)], false));
+        }
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn every_tunnel_failing_at_once_is_treated_as_this_machine_offline() {
+        let mut app = drawn_demo();
+        let a = app.tunnels[0].tunnel.name.clone();
+        let b = app.tunnels[1].tunnel.name.clone();
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
+            false,
+        ));
+
+        for _ in 0..5 {
+            app.apply_health_round(round(
+                &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Unhealthy)],
+                false,
+            ));
+        }
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+        assert_eq!(health_of(&app, &b), HealthStatus::Healthy);
+        assert!(app.health_fails.is_empty());
+        assert_eq!(app.offline_rounds, 5);
+
+        app.apply_health_round(round(
+            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Unhealthy)],
+            false,
+        ));
+        assert_eq!(app.offline_rounds, 0);
+        assert_eq!(app.health_fails.get(&b), Some(&1));
+    }
+
+    #[test]
+    fn a_manual_check_reports_a_pending_failure() {
+        let mut app = drawn_demo();
+        let a = app.tunnels[0].tunnel.name.clone();
+        app.apply_health_round(round(&[(&a, HealthStatus::Healthy)], true));
+        app.apply_health_round(round(&[(&a, HealthStatus::Unhealthy)], true));
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("1 of 3 failed checks"));
     }
 }

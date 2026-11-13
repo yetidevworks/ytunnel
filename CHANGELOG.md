@@ -2,6 +2,9 @@
 
 ### v1.1.0
 
+- **Fewer false down/up notifications** - A tunnel was marked down, with a notification, the first time a single health probe failed, so any short Wi-Fi or DNS drop on this machine produced a "Tunnel Down" and a "Tunnel Up" for every tunnel. A tunnel is now marked down only after 3 failed checks in a row (about 90 seconds), and one successful check clears it. The probe timeout is 10 seconds instead of 5
+- **Offline detection** - When every tunnel fails the same check, the problem is this machine's network, not the tunnels. ytunnel now leaves the tunnels' state alone, shows that the machine may be offline, and sends one notification if it lasts through 3 checks, plus one when the tunnels answer again
+- **Health checks don't freeze the UI** - Probes run in the background, so a check during an outage no longer locks the TUI for the length of the timeout
 - **Live log tail** - The log panel reads new lines from the log file every second, instead of only after start, stop or import
 - **Scrollable log panel** - `Tab` moves focus to the logs; then `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `Home`/`End` and the mouse wheel scroll through the last 5000 lines. The panel follows new lines until you scroll up, and stays put while you read. Long lines wrap without pushing the newest line out of view, and large log files open instantly because only the end is read
 - **Mouse support** - Click a pane to focus it and click a tunnel to select it. The mouse wheel scrolls whichever pane is under the pointer: the logs, or the tunnel selection. Mouse movement isn't reported, so it costs nothing. To select text, hold `Shift` while dragging (`Option` in Terminal.app)

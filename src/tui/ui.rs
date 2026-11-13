@@ -245,6 +245,11 @@ fn render_help_modal(f: &mut Frame) {
             Span::styled("30 seconds", Style::default().fg(Color::Green)),
         ]),
         Line::from(vec![
+            Span::raw("  A tunnel is marked down after "),
+            Span::styled("3 failed checks", Style::default().fg(Color::Green)),
+            Span::raw(" in a row"),
+        ]),
+        Line::from(vec![
             Span::raw("  System notifications on tunnel "),
             Span::styled("down/up", Style::default().fg(Color::Red)),
         ]),

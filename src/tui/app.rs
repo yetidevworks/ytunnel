@@ -40,16 +40,119 @@ const HEALTH_FAILS_TO_DOWN: u32 = 3;
 // and back to the local origin, and a cold PHP site can be slow to answer.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
 
-// Turn an HTTP probe result into a health verdict
-fn classify_health(result: reqwest::Result<reqwest::Response>) -> HealthStatus {
-    match result {
-        Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
-            HealthStatus::Healthy
-        }
-        Ok(resp) if resp.status().is_server_error() => HealthStatus::Unhealthy,
-        Ok(_) => HealthStatus::Healthy, // 4xx is still "reachable"
-        Err(_) => HealthStatus::Unhealthy,
+// Edge connections cloudflared keeps open when all is well. ytunnel starts it
+// without --ha-connections, so this is cloudflared's default.
+const HA_NORMAL: u64 = 4;
+
+// A tunnel that had fewer than HA_NORMAL connections this recently is treated
+// as reconnecting: cloudflared lost its link to Cloudflare and is already
+// fixing it, so a failed probe then says more about this machine's network
+// than about the tunnel, and isn't counted.
+const RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+
+// A tunnel that keeps failing for this long is reported down even if none of
+// the failures counted, so one that can't reconnect at all still gets noticed
+const FAILING_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+// health.log is rotated to health.log.1 once it passes this size
+const HEALTH_LOG_MAX: u64 = 1024 * 1024;
+
+// What one health probe saw
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    // Any 2xx, 3xx or 4xx: the tunnel and origin are reachable
+    Ok(u16),
+    // Cloudflare or the origin answered with a 5xx
+    ServerError(u16),
+    // No HTTP response at all: timeout, DNS or connection failure
+    NoResponse(&'static str),
+}
+
+impl Probe {
+    fn is_ok(self) -> bool {
+        matches!(self, Probe::Ok(_))
     }
+
+    fn describe(self) -> String {
+        match self {
+            Probe::Ok(code) | Probe::ServerError(code) => format!("HTTP {}", code),
+            Probe::NoResponse(why) => why.to_string(),
+        }
+    }
+}
+
+// Turn an HTTP probe result into a Probe
+fn classify_probe(result: reqwest::Result<reqwest::Response>) -> Probe {
+    match result {
+        Ok(resp) if resp.status().is_server_error() => Probe::ServerError(resp.status().as_u16()),
+        Ok(resp) => Probe::Ok(resp.status().as_u16()), // 4xx is still "reachable"
+        Err(e) if e.is_timeout() => Probe::NoResponse("timeout"),
+        Err(e) if e.is_connect() => Probe::NoResponse("no connection"),
+        Err(_) => Probe::NoResponse("request error"),
+    }
+}
+
+// Current UTC time as 2026-11-13T04:10:38Z, the format cloudflared logs use,
+// so health.log lines up with the tunnel logs
+fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    utc_timestamp_at(secs)
+}
+
+fn utc_timestamp_at(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since the epoch to a civil date (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+// (name, hostname, metrics url) for probing a tunnel
+fn probe_target(entry: &TunnelEntry) -> (String, String, String) {
+    (
+        entry.tunnel.name.clone(),
+        entry.tunnel.hostname.clone(),
+        entry.tunnel.metrics_url(),
+    )
+}
+
+// cloudflared's current edge connection count, or None if it didn't answer
+async fn ha_connections(metrics_url: &str) -> Option<u64> {
+    let metrics = TunnelMetrics::fetch(metrics_url).await;
+    metrics.available.then_some(metrics.ha_connections)
+}
+
+// One health.log line (without the timestamp) for a probe result
+fn health_log_line(r: &ProbeResult, verdict: &str) -> String {
+    let ha = |v: Option<u64>| v.map_or("?".to_string(), |n| n.to_string());
+    let status = if r.probe.is_ok() { "ok" } else { "fail" };
+    format!(
+        "{} {} {} ha={}->{}{}",
+        r.name,
+        status,
+        r.probe.describe(),
+        ha(r.ha_before),
+        ha(r.ha_after),
+        verdict
+    )
 }
 
 // Check if a key event is a cancel key (Esc or Ctrl+C)
@@ -757,8 +860,13 @@ pub struct App {
     // Background discovery results arrive here
     discovery_tx: mpsc::UnboundedSender<DiscoveryResult>,
     discovery_rx: mpsc::UnboundedReceiver<DiscoveryResult>,
-    // Consecutive failed health probes per tunnel name. Cleared by a success.
+    // Counted failed health probes in a row per tunnel name. Cleared by a
+    // success. Failures while the tunnel is reconnecting aren't counted.
     health_fails: HashMap<String, u32>,
+    // When each tunnel's current run of failed probes began, counted or not
+    failing_since: HashMap<String, Instant>,
+    // When each tunnel was last seen with fewer than HA_NORMAL connections
+    ha_short_at: HashMap<String, Instant>,
     // Consecutive periodic rounds in which no tunnel answered at all
     offline_rounds: u32,
     // Tunnels with a health probe currently running
@@ -776,10 +884,19 @@ struct DiscoveryResult {
     tunnels: Result<Vec<cloudflare::Tunnel>>,
 }
 
+// One tunnel's probe, with cloudflared's connection count read just before
+// and just after it (None if the metrics endpoint didn't answer)
+struct ProbeResult {
+    name: String,
+    probe: Probe,
+    ha_before: Option<u64>,
+    ha_after: Option<u64>,
+}
+
 // Outcome of one batch of health probes, keyed by tunnel name since the
 // tunnel list can change while the probes run
 struct HealthRound {
-    results: Vec<(String, HealthStatus)>,
+    results: Vec<ProbeResult>,
     // Started by the user (h, or selecting an unchecked tunnel) rather than
     // the 30-second timer
     manual: bool,
@@ -847,6 +964,8 @@ impl App {
             discovery_tx,
             discovery_rx,
             health_fails: HashMap::new(),
+            failing_since: HashMap::new(),
+            ha_short_at: HashMap::new(),
             offline_rounds: 0,
             health_in_flight: HashSet::new(),
             health_tx,
@@ -913,6 +1032,8 @@ impl App {
             discovery_tx,
             discovery_rx,
             health_fails: HashMap::new(),
+            failing_since: HashMap::new(),
+            ha_short_at: HashMap::new(),
             offline_rounds: 0,
             health_in_flight: HashSet::new(),
             health_tx,
@@ -1665,6 +1786,12 @@ impl App {
             if entry.kind == TunnelKind::Managed && entry.status == TunnelStatus::Running {
                 let metrics = TunnelMetrics::fetch(&entry.tunnel.metrics_url()).await;
                 if metrics.available {
+                    // The selected tunnel gets a connection count every 5
+                    // seconds, which catches short reconnects between probes
+                    if metrics.ha_connections < HA_NORMAL {
+                        self.ha_short_at
+                            .insert(entry.tunnel.name.clone(), Instant::now());
+                    }
                     entry.metrics_history.record(metrics.total_requests);
                     entry.metrics = Some(metrics);
                 } else {
@@ -1694,14 +1821,14 @@ impl App {
             entry.health = HealthStatus::Unknown;
             let name = entry.tunnel.name.clone();
             self.health_fails.remove(&name);
+            self.failing_since.remove(&name);
             self.status_message = Some("Tunnel not running".to_string());
             return;
         }
 
-        let name = entry.tunnel.name.clone();
-        let hostname = entry.tunnel.hostname.clone();
-        self.status_message = Some(format!("Checking health of {}...", name));
-        self.spawn_health_probes(vec![(name, hostname)], true);
+        let target = probe_target(entry);
+        self.status_message = Some(format!("Checking health of {}...", target.0));
+        self.spawn_health_probes(vec![target], true);
     }
 
     // Check health of all running tunnels (the 30-second timer)
@@ -1709,22 +1836,22 @@ impl App {
         if self.demo {
             return;
         }
-        let targets: Vec<(String, String)> = self
+        let targets: Vec<(String, String, String)> = self
             .tunnels
             .iter()
             .filter(|e| e.status == TunnelStatus::Running && !e.tunnel.hostname.is_empty())
-            .map(|e| (e.tunnel.name.clone(), e.tunnel.hostname.clone()))
+            .map(probe_target)
             .collect();
         self.spawn_health_probes(targets, false);
     }
 
-    // Probe (name, hostname) pairs in the background, all at once, and send
-    // the batch back as one round. Awaiting them here would freeze the UI for
-    // up to HEALTH_TIMEOUT whenever the network is down.
-    fn spawn_health_probes(&mut self, targets: Vec<(String, String)>, manual: bool) {
-        let targets: Vec<(String, String)> = targets
+    // Probe (name, hostname, metrics url) targets in the background, all at
+    // once, and send the batch back as one round. Awaiting them here would
+    // freeze the UI for up to HEALTH_TIMEOUT whenever the network is down.
+    fn spawn_health_probes(&mut self, targets: Vec<(String, String, String)>, manual: bool) {
+        let targets: Vec<(String, String, String)> = targets
             .into_iter()
-            .filter(|(name, _)| !self.health_in_flight.contains(name))
+            .filter(|(name, _, _)| !self.health_in_flight.contains(name))
             .collect();
         if targets.is_empty() {
             return;
@@ -1739,7 +1866,7 @@ impl App {
             Err(_) => return,
         };
 
-        for (name, _) in &targets {
+        for (name, _, _) in &targets {
             self.health_in_flight.insert(name.clone());
         }
         let tx = self.health_tx.clone();
@@ -1747,11 +1874,22 @@ impl App {
         tokio::spawn(async move {
             let handles: Vec<_> = targets
                 .into_iter()
-                .map(|(name, hostname)| {
+                .map(|(name, hostname, metrics_url)| {
                     let client = client.clone();
                     tokio::spawn(async move {
+                        // Read the connection count on both sides of the
+                        // probe: a stalled link usually only shows up as a
+                        // dropped connection once the probe is under way
+                        let ha_before = ha_connections(&metrics_url).await;
                         let url = format!("https://{}", hostname);
-                        (name, classify_health(client.head(&url).send().await))
+                        let probe = classify_probe(client.head(&url).send().await);
+                        let ha_after = ha_connections(&metrics_url).await;
+                        ProbeResult {
+                            name,
+                            probe,
+                            ha_before,
+                            ha_after,
+                        }
                     })
                 })
                 .collect();
@@ -1770,34 +1908,60 @@ impl App {
     // Fold in any finished health probes
     pub fn poll_health(&mut self) {
         while let Ok(round) = self.health_rx.try_recv() {
-            for (name, _) in &round.results {
-                self.health_in_flight.remove(name);
+            for result in &round.results {
+                self.health_in_flight.remove(&result.name);
             }
             self.apply_health_round(round);
         }
     }
 
     fn apply_health_round(&mut self, round: HealthRound) {
-        // Every tunnel failing in the same round points at this machine's
-        // network (the probes go out from here too), not at the tunnels. Leave
-        // each tunnel's state alone and report it once, as one problem.
-        let all_failed = !round.manual
-            && round.results.len() > 1
-            && round
-                .results
-                .iter()
-                .all(|(_, h)| *h == HealthStatus::Unhealthy);
+        let now = Instant::now();
+        for r in &round.results {
+            if [r.ha_before, r.ha_after]
+                .into_iter()
+                .flatten()
+                .any(|ha| ha < HA_NORMAL)
+            {
+                self.ha_short_at.insert(r.name.clone(), now);
+            }
+        }
 
-        if all_failed {
+        // More than half the tunnels getting no response at all points at
+        // this machine's network (the probes go out from here too), not at
+        // the tunnels. A 5xx doesn't count toward this: it means Cloudflare
+        // answered, so the network is fine and the tunnel or origin isn't.
+        let no_response = round
+            .results
+            .iter()
+            .filter(|r| matches!(r.probe, Probe::NoResponse(_)))
+            .count();
+        let offline =
+            !round.manual && round.results.len() > 1 && no_response * 2 > round.results.len();
+
+        if offline {
+            let mut lines = Vec::new();
+            for r in &round.results {
+                let verdict = if r.probe.is_ok() {
+                    String::new()
+                } else {
+                    " not counted (most tunnels got no response, this machine may be offline)"
+                        .to_string()
+                };
+                lines.push(health_log_line(r, &verdict));
+            }
+            self.write_health_log(&lines);
+
             self.offline_rounds += 1;
             if self.offline_rounds == HEALTH_FAILS_TO_DOWN {
                 self.send_system_notification(
                     "Tunnels unreachable",
-                    "None of the tunnels answered. Check this machine's network connection.",
+                    "Most tunnels aren't answering. Check this machine's network connection.",
                 );
             }
             self.status_message = Some(
-                "⚠ No tunnel answered. This machine may be offline, rechecking in 30s".to_string(),
+                "⚠ Most tunnels didn't answer. This machine may be offline, rechecking in 30s"
+                    .to_string(),
             );
             return;
         }
@@ -1808,48 +1972,98 @@ impl App {
         }
         self.offline_rounds = 0;
 
-        for (name, probe) in round.results {
-            self.record_probe(&name, probe, round.manual);
+        let mut lines = Vec::new();
+        for r in round.results {
+            if let Some(line) = self.record_probe(&r, round.manual, now) {
+                lines.push(line);
+            }
         }
+        self.write_health_log(&lines);
     }
 
-    // Apply one probe result to a tunnel. A success counts at once; a failure
-    // only marks the tunnel down after HEALTH_FAILS_TO_DOWN in a row.
-    fn record_probe(&mut self, name: &str, probe: HealthStatus, manual: bool) {
-        let Some(entry) = self.tunnels.iter_mut().find(|e| e.tunnel.name == name) else {
-            return;
-        };
+    // Apply one probe result to a tunnel. A success counts at once. A failure
+    // marks the tunnel down after HEALTH_FAILS_TO_DOWN counted failures in a
+    // row, where failures while cloudflared is reconnecting don't count, or
+    // after FAILING_LIMIT of failing either way. Returns the health.log line.
+    fn record_probe(&mut self, r: &ProbeResult, manual: bool, now: Instant) -> Option<String> {
+        let name = r.name.as_str();
+        let reconnecting = self
+            .ha_short_at
+            .get(name)
+            .is_some_and(|t| now.duration_since(*t) < RECONNECT_WINDOW);
+
+        let entry = self.tunnels.iter_mut().find(|e| e.tunnel.name == name)?;
         let old = entry.health;
 
-        let fails = if probe == HealthStatus::Unhealthy {
-            let n = self.health_fails.entry(name.to_string()).or_insert(0);
-            *n += 1;
-            *n
-        } else {
+        let (fails, failing_for) = if r.probe.is_ok() {
             self.health_fails.remove(name);
-            0
+            self.failing_since.remove(name);
+            (0, Duration::ZERO)
+        } else {
+            let since = *self.failing_since.entry(name.to_string()).or_insert(now);
+            let n = self.health_fails.entry(name.to_string()).or_insert(0);
+            if !reconnecting {
+                *n += 1;
+            }
+            (*n, now.duration_since(since))
         };
 
-        let new = match probe {
-            HealthStatus::Unhealthy if fails < HEALTH_FAILS_TO_DOWN => old,
-            other => other,
+        let new = if r.probe.is_ok() {
+            HealthStatus::Healthy
+        } else if fails >= HEALTH_FAILS_TO_DOWN || failing_for >= FAILING_LIMIT {
+            HealthStatus::Unhealthy
+        } else {
+            old
         };
         entry.health = new;
 
+        let mut verdict = if r.probe.is_ok() {
+            String::new()
+        } else if reconnecting {
+            format!(
+                " not counted (cloudflared reconnecting) {}/{}, failing for {}s",
+                fails,
+                HEALTH_FAILS_TO_DOWN,
+                failing_for.as_secs()
+            )
+        } else {
+            format!(
+                " counted {}/{}, failing for {}s",
+                fails,
+                HEALTH_FAILS_TO_DOWN,
+                failing_for.as_secs()
+            )
+        };
         if manual {
-            self.status_message = Some(match probe {
-                HealthStatus::Healthy => format!("✓ {} is healthy", name),
-                _ if new == HealthStatus::Unhealthy => format!("✗ {} is unreachable", name),
-                _ => format!(
-                    "✗ {} didn't answer ({} of {} failed checks before it's marked down)",
-                    name, fails, HEALTH_FAILS_TO_DOWN
-                ),
+            verdict.push_str(" (manual check)");
+        }
+
+        if manual {
+            self.status_message = Some(if r.probe.is_ok() {
+                format!("✓ {} is healthy", name)
+            } else if new == HealthStatus::Unhealthy {
+                format!("✗ {} is unreachable ({})", name, r.probe.describe())
+            } else if reconnecting {
+                format!(
+                    "✗ {} didn't answer ({}), but cloudflared is reconnecting, so it isn't counted",
+                    name,
+                    r.probe.describe()
+                )
+            } else {
+                format!(
+                    "✗ {} didn't answer ({}), {} of {} failed checks before it's marked down",
+                    name,
+                    r.probe.describe(),
+                    fails,
+                    HEALTH_FAILS_TO_DOWN
+                )
             });
         }
 
         // Notify only on a confirmed change
         match (old, new) {
             (HealthStatus::Healthy, HealthStatus::Unhealthy) => {
+                verdict.push_str(" -> DOWN");
                 self.status_message = Some(format!("⚠️  Tunnel '{}' is DOWN!", name));
                 self.send_system_notification(
                     &format!("Tunnel Down: {}", name),
@@ -1857,6 +2071,7 @@ impl App {
                 );
             }
             (HealthStatus::Unhealthy, HealthStatus::Healthy) => {
+                verdict.push_str(" -> UP");
                 self.status_message = Some(format!("✓ Tunnel '{}' is back UP", name));
                 self.send_system_notification(
                     &format!("Tunnel Up: {}", name),
@@ -1864,6 +2079,35 @@ impl App {
                 );
             }
             _ => {}
+        }
+
+        Some(health_log_line(r, &verdict))
+    }
+
+    // Append lines to health.log in the config folder, next to tunnels.toml.
+    // Best effort: a write failure never gets in the way of the TUI.
+    fn write_health_log(&self, lines: &[String]) {
+        use std::io::Write;
+
+        if self.demo || lines.is_empty() {
+            return;
+        }
+        let Ok(dir) = config::config_dir() else {
+            return;
+        };
+        let path = dir.join("health.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > HEALTH_LOG_MAX) {
+            std::fs::rename(&path, dir.join("health.log.1")).ok();
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let ts = utc_timestamp();
+            for line in lines {
+                writeln!(file, "{} {}", ts, line).ok();
+            }
         }
     }
 
@@ -2023,7 +2267,7 @@ impl App {
                     // Never probed: not already running, and no failures
                     // pending that the 30-second timer will follow up on
                     && !self.health_in_flight.contains(&e.tunnel.name)
-                    && !self.health_fails.contains_key(&e.tunnel.name)
+                    && !self.failing_since.contains_key(&e.tunnel.name)
             })
             .unwrap_or(false)
     }
@@ -3392,11 +3636,44 @@ mod tests {
         assert_eq!(app.focus, Focus::Tunnels);
     }
 
-    fn round(results: &[(&str, HealthStatus)], manual: bool) -> HealthRound {
-        HealthRound {
-            results: results.iter().map(|(n, h)| (n.to_string(), *h)).collect(),
-            manual,
+    const OK: Probe = Probe::Ok(200);
+    const BAD_GATEWAY: Probe = Probe::ServerError(502);
+    const SILENT: Probe = Probe::NoResponse("timeout");
+
+    // A probe result with all of cloudflared's connections up
+    fn up(name: &str, probe: Probe) -> ProbeResult {
+        with_ha(name, probe, 4, 4)
+    }
+
+    fn with_ha(name: &str, probe: Probe, before: u64, after: u64) -> ProbeResult {
+        ProbeResult {
+            name: name.to_string(),
+            probe,
+            ha_before: Some(before),
+            ha_after: Some(after),
         }
+    }
+
+    fn auto(results: Vec<ProbeResult>) -> HealthRound {
+        HealthRound {
+            results,
+            manual: false,
+        }
+    }
+
+    // A demo app with three running tunnels, all checked healthy once
+    fn checked_demo() -> (App, String, String, String) {
+        let mut app = drawn_demo();
+        let names: Vec<String> = app
+            .tunnels
+            .iter()
+            .filter(|e| e.status == TunnelStatus::Running)
+            .take(3)
+            .map(|e| e.tunnel.name.clone())
+            .collect();
+        let (a, b, c) = (names[0].clone(), names[1].clone(), names[2].clone());
+        app.apply_health_round(auto(vec![up(&a, OK), up(&b, OK), up(&c, OK)]));
+        (app, a, b, c)
     }
 
     fn health_of(app: &App, name: &str) -> HealthStatus {
@@ -3407,102 +3684,182 @@ mod tests {
             .health
     }
 
+    fn ago(secs: u64) -> Instant {
+        Instant::now() - Duration::from_secs(secs)
+    }
+
     #[test]
     fn one_failed_probe_does_not_mark_a_tunnel_down() {
-        let mut app = drawn_demo();
-        let a = app.tunnels[0].tunnel.name.clone();
-        let b = app.tunnels[1].tunnel.name.clone();
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
-            false,
-        ));
+        let (mut app, a, b, c) = checked_demo();
 
         // Two failures stay healthy, the third confirms it
         for _ in 1..HEALTH_FAILS_TO_DOWN {
-            app.apply_health_round(round(
-                &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Healthy)],
-                false,
-            ));
+            app.apply_health_round(auto(vec![up(&a, BAD_GATEWAY), up(&b, OK), up(&c, OK)]));
             assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
         }
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Healthy)],
-            false,
-        ));
+        app.apply_health_round(auto(vec![up(&a, BAD_GATEWAY), up(&b, OK), up(&c, OK)]));
         assert_eq!(health_of(&app, &a), HealthStatus::Unhealthy);
 
         // One success brings it straight back
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
-            false,
-        ));
+        app.apply_health_round(auto(vec![up(&a, OK), up(&b, OK), up(&c, OK)]));
         assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
         assert!(!app.health_fails.contains_key(&a));
+        assert!(!app.failing_since.contains_key(&a));
     }
 
     #[test]
     fn a_success_resets_the_failure_count() {
-        let mut app = drawn_demo();
-        let a = app.tunnels[0].tunnel.name.clone();
-        let b = app.tunnels[1].tunnel.name.clone();
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
-            false,
-        ));
+        let (mut app, a, b, c) = checked_demo();
 
         // fail, fail, ok, fail, fail never reaches three in a row
-        for probe in [
-            HealthStatus::Unhealthy,
-            HealthStatus::Unhealthy,
-            HealthStatus::Healthy,
-            HealthStatus::Unhealthy,
-            HealthStatus::Unhealthy,
-        ] {
-            app.apply_health_round(round(&[(&a, probe), (&b, HealthStatus::Healthy)], false));
+        for probe in [BAD_GATEWAY, BAD_GATEWAY, OK, BAD_GATEWAY, BAD_GATEWAY] {
+            app.apply_health_round(auto(vec![up(&a, probe), up(&b, OK), up(&c, OK)]));
         }
         assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
     }
 
     #[test]
-    fn every_tunnel_failing_at_once_is_treated_as_this_machine_offline() {
-        let mut app = drawn_demo();
-        let a = app.tunnels[0].tunnel.name.clone();
-        let b = app.tunnels[1].tunnel.name.clone();
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Healthy)],
-            false,
-        ));
+    fn most_tunnels_not_answering_is_treated_as_this_machine_offline() {
+        let (mut app, a, b, c) = checked_demo();
 
+        // Two of three with no response at all: nothing is counted
         for _ in 0..5 {
-            app.apply_health_round(round(
-                &[(&a, HealthStatus::Unhealthy), (&b, HealthStatus::Unhealthy)],
-                false,
-            ));
+            app.apply_health_round(auto(vec![up(&a, SILENT), up(&b, SILENT), up(&c, OK)]));
         }
         assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
         assert_eq!(health_of(&app, &b), HealthStatus::Healthy);
         assert!(app.health_fails.is_empty());
         assert_eq!(app.offline_rounds, 5);
 
-        app.apply_health_round(round(
-            &[(&a, HealthStatus::Healthy), (&b, HealthStatus::Unhealthy)],
-            false,
-        ));
+        // A 5xx means Cloudflare answered, so the network is fine and these
+        // failures belong to the tunnels
+        app.apply_health_round(auto(vec![
+            up(&a, BAD_GATEWAY),
+            up(&b, BAD_GATEWAY),
+            up(&c, OK),
+        ]));
         assert_eq!(app.offline_rounds, 0);
+        assert_eq!(app.health_fails.get(&a), Some(&1));
         assert_eq!(app.health_fails.get(&b), Some(&1));
     }
 
     #[test]
-    fn a_manual_check_reports_a_pending_failure() {
-        let mut app = drawn_demo();
-        let a = app.tunnels[0].tunnel.name.clone();
-        app.apply_health_round(round(&[(&a, HealthStatus::Healthy)], true));
-        app.apply_health_round(round(&[(&a, HealthStatus::Unhealthy)], true));
+    fn half_the_tunnels_not_answering_is_not_offline() {
+        let (mut app, a, b, _) = checked_demo();
+        app.apply_health_round(auto(vec![up(&a, SILENT), up(&b, OK)]));
+        assert_eq!(app.offline_rounds, 0);
+        assert_eq!(app.health_fails.get(&a), Some(&1));
+    }
+
+    #[test]
+    fn failures_while_cloudflared_reconnects_are_not_counted() {
+        let (mut app, a, b, c) = checked_demo();
+
+        // The connection count dropped during each probe
+        for _ in 0..5 {
+            app.apply_health_round(auto(vec![
+                with_ha(&a, SILENT, 4, 2),
+                up(&b, OK),
+                up(&c, OK),
+            ]));
+        }
         assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
-        assert!(app
-            .status_message
-            .as_deref()
-            .unwrap()
-            .contains("1 of 3 failed checks"));
+        assert_eq!(app.health_fails.get(&a), Some(&0));
+
+        // Still within a minute of the drop: a failure with all connections
+        // back up isn't counted either
+        app.apply_health_round(auto(vec![up(&a, BAD_GATEWAY), up(&b, OK), up(&c, OK)]));
+        assert_eq!(app.health_fails.get(&a), Some(&0));
+
+        // Once the connections have been back for a minute, failures count
+        app.ha_short_at.insert(a.clone(), ago(61));
+        app.apply_health_round(auto(vec![up(&a, BAD_GATEWAY), up(&b, OK), up(&c, OK)]));
+        assert_eq!(app.health_fails.get(&a), Some(&1));
+    }
+
+    #[test]
+    fn a_short_connection_count_from_the_metrics_panel_counts_as_reconnecting() {
+        let (mut app, a, b, c) = checked_demo();
+        app.ha_short_at.insert(a.clone(), ago(20));
+        app.apply_health_round(auto(vec![up(&a, BAD_GATEWAY), up(&b, OK), up(&c, OK)]));
+        assert_eq!(app.health_fails.get(&a), Some(&0));
+    }
+
+    #[test]
+    fn a_tunnel_failing_for_five_minutes_is_down_even_while_reconnecting() {
+        let (mut app, a, b, c) = checked_demo();
+        app.apply_health_round(auto(vec![
+            with_ha(&a, SILENT, 0, 0),
+            up(&b, OK),
+            up(&c, OK),
+        ]));
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+
+        app.failing_since.insert(a.clone(), ago(301));
+        app.apply_health_round(auto(vec![
+            with_ha(&a, SILENT, 0, 0),
+            up(&b, OK),
+            up(&c, OK),
+        ]));
+        assert_eq!(health_of(&app, &a), HealthStatus::Unhealthy);
+    }
+
+    // The pivx outage of 2026-11-12 21:07-21:12 MST: about three minutes of
+    // failed probes while its edge connections kept dropping, with the other
+    // tunnels mostly answering. 1.1.0 reported it down; it shouldn't be.
+    #[test]
+    fn a_tunnel_reconnecting_through_a_flaky_network_is_not_reported_down() {
+        let (mut app, pivx, b, c) = checked_demo();
+        let rounds = [
+            with_ha(&pivx, SILENT, 4, 3),
+            with_ha(&pivx, SILENT, 3, 3),
+            with_ha(&pivx, SILENT, 4, 2),
+            with_ha(&pivx, Probe::ServerError(530), 0, 0),
+            with_ha(&pivx, Probe::ServerError(530), 0, 4),
+            with_ha(&pivx, SILENT, 4, 3),
+        ];
+        for probe in rounds {
+            app.apply_health_round(auto(vec![probe, up(&b, OK), up(&c, OK)]));
+            assert_eq!(health_of(&app, &pivx), HealthStatus::Healthy);
+        }
+        app.apply_health_round(auto(vec![up(&pivx, OK), up(&b, OK), up(&c, OK)]));
+        assert!(!app.failing_since.contains_key(&pivx));
+    }
+
+    #[test]
+    fn a_manual_check_reports_a_pending_failure() {
+        let (mut app, a, _, _) = checked_demo();
+        app.apply_health_round(HealthRound {
+            results: vec![up(&a, BAD_GATEWAY)],
+            manual: true,
+        });
+        assert_eq!(health_of(&app, &a), HealthStatus::Healthy);
+        let message = app.status_message.clone().unwrap();
+        assert!(message.contains("HTTP 502"), "{}", message);
+        assert!(message.contains("1 of 3 failed checks"), "{}", message);
+    }
+
+    #[test]
+    fn utc_timestamps_match_cloudflared() {
+        assert_eq!(utc_timestamp_at(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_timestamp_at(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(utc_timestamp_at(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(utc_timestamp_at(1_794_543_038), "2026-11-13T04:10:38Z");
+    }
+
+    #[test]
+    fn health_log_lines_show_the_probe_and_connection_counts() {
+        let line = health_log_line(&with_ha("pivx", SILENT, 4, 2), " not counted");
+        assert_eq!(line, "pivx fail timeout ha=4->2 not counted");
+        let line = health_log_line(
+            &ProbeResult {
+                name: "rochen".into(),
+                probe: OK,
+                ha_before: None,
+                ha_after: Some(4),
+            },
+            "",
+        );
+        assert_eq!(line, "rochen ok HTTP 200 ha=?->4");
     }
 }

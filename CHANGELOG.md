@@ -1,5 +1,12 @@
 ## Changelog
 
+### v1.1.1
+
+- **No down notifications while cloudflared is reconnecting** - 1.1.0 still reported a tunnel down when the network stayed unsettled for a few minutes: the tunnels lost their Cloudflare connections at different moments, some kept answering, so nothing looked like a full outage, and a tunnel that was reconnecting for 80 seconds hit 3 failed checks. A failed check no longer counts while that tunnel's cloudflared has been short of its usual 4 edge connections at any point in the last minute, since it's already reconnecting. The count is read just before and just after each probe, and every 5 seconds for the selected tunnel. A tunnel that keeps failing for 5 minutes is reported down regardless, so one that can't reconnect at all is still caught
+- **Offline detection covers partial outages** - This machine is treated as offline when more than half the tunnels get no response at all in the same check, not only when every one fails. A 5xx response doesn't count toward this, since it means Cloudflare answered and the problem is the tunnel or its origin
+- **`health.log`** - Every health check is written to `health.log` in the ytunnel config folder: one line per tunnel with the result (HTTP status, timeout or connection failure), cloudflared's connection count before and after the probe, and whether a failure counted toward marking it down. Timestamps are UTC to match the tunnel logs. Rotates to `health.log.1` at 1 MB
+- **Clearer manual checks** - `h` now says why a check failed (HTTP status, timeout or no connection) and whether the failure was counted
+
 ### v1.1.0
 
 - **Fewer false down/up notifications** - A tunnel was marked down, with a notification, the first time a single health probe failed, so any short Wi-Fi or DNS drop on this machine produced a "Tunnel Down" and a "Tunnel Up" for every tunnel. A tunnel is now marked down only after 3 failed checks in a row (about 90 seconds), and one successful check clears it. The probe timeout is 10 seconds instead of 5

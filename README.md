@@ -233,7 +233,9 @@ For running tunnels, the TUI displays live metrics from cloudflared's Prometheus
 - **Status Codes** - Breakdown of HTTP response codes
 - **Traffic** - Sparkline showing request rate over time
 
-Metrics auto-refresh every 5 seconds. Health checks run every 30 seconds, and `h` runs one immediately. A tunnel is only marked unreachable (and a notification sent) after 3 failed checks in a row, so a brief network drop doesn't produce a down/up pair. When every tunnel fails in the same check, ytunnel reports this machine as offline instead of marking each tunnel down, and sends one notification if it lasts through 3 checks.
+Metrics auto-refresh every 5 seconds. Health checks run every 30 seconds, and `h` runs one immediately. A tunnel is only marked unreachable (and a notification sent) after 3 failed checks in a row, so a brief network drop doesn't produce a down/up pair. A failed check doesn't count while that tunnel's `cloudflared` is reconnecting to Cloudflare (it had fewer than its usual 4 edge connections at some point in the last minute), since it's already fixing the problem itself; a tunnel that keeps failing for 5 minutes is reported down regardless. When more than half the tunnels get no response at all in the same check, ytunnel reports this machine as offline instead of marking tunnels down, and sends one notification if it lasts through 3 checks.
+
+Every check is written to `health.log` in the ytunnel config folder (next to `tunnels.toml`; `~/Library/Application Support/ytunnel/` on macOS), one line per tunnel with the result, `cloudflared`'s connection count before and after the probe, and whether a failure counted. Timestamps are UTC, matching the tunnel logs. The file rotates to `health.log.1` at 1 MB.
 
 ### Notifications
 

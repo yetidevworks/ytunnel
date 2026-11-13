@@ -250,6 +250,11 @@ fn render_help_modal(f: &mut Frame) {
             Span::raw(" in a row"),
         ]),
         Line::from(vec![
+            Span::raw("  Failures while cloudflared is "),
+            Span::styled("reconnecting", Style::default().fg(Color::Green)),
+            Span::raw(" don't count"),
+        ]),
+        Line::from(vec![
             Span::raw("  System notifications on tunnel "),
             Span::styled("down/up", Style::default().fg(Color::Red)),
         ]),
